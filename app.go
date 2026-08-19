@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -25,6 +26,7 @@ type App struct {
 	command  *exec.Cmd
 	proxy    *HarnessProxy
 	logFile  *os.File
+	bridge   *http.Server
 	stopOnce sync.Once
 }
 
@@ -40,6 +42,9 @@ func (a *App) startup(ctx context.Context) {
 
 func (a *App) shutdown(context.Context) {
 	a.stopOnce.Do(func() {
+		if a.bridge != nil {
+			_ = a.bridge.Close()
+		}
 		if a.command != nil && a.command.Process != nil {
 			_ = a.command.Process.Kill()
 		}
@@ -105,7 +110,19 @@ func (a *App) startHarness() error {
 	if err := waitForHarness(target.String(), a.command, 90*time.Second); err != nil {
 		return fmt.Errorf("%w; log: %s", err, logPath)
 	}
-	a.proxy.Ready(newHarnessReverseProxy(target, runtime.GOOS))
+	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("start local WebSocket bridge: %w", err)
+	}
+	a.bridge = &http.Server{Handler: newHarnessWebSocketBridge(target)}
+	go func() {
+		if serveErr := a.bridge.Serve(bridgeListener); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("DeepSeek Harness WebSocket bridge failed: %v", serveErr)
+		}
+	}()
+	bridgeWebSocketBase := "ws://" + bridgeListener.Addr().String()
+	log.Printf("DeepSeek Harness WebSocket bridge: %s", bridgeWebSocketBase)
+	a.proxy.Ready(newHarnessReverseProxy(target, runtime.GOOS, bridgeWebSocketBase))
 	go func() {
 		if waitErr := a.command.Wait(); waitErr != nil {
 			a.proxy.Fail(fmt.Errorf("dsh exited: %w; log: %s", waitErr, logPath))
@@ -114,7 +131,7 @@ func (a *App) startHarness() error {
 	return nil
 }
 
-func newHarnessReverseProxy(target *url.URL, platform string) *httputil.ReverseProxy {
+func newHarnessTransportProxy(target *url.URL) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	director := proxy.Director
 	proxy.Director = func(request *http.Request) {
@@ -125,10 +142,85 @@ func newHarnessReverseProxy(target *url.URL, platform string) *httputil.ReverseP
 			request.Header.Set("Origin", target.Scheme+"://"+target.Host)
 		}
 	}
-	proxy.ModifyResponse = func(response *http.Response) error {
-		if platform != "darwin" && platform != "windows" {
-			return nil
+	return proxy
+}
+
+func newHarnessWebSocketBridge(target *url.URL) http.Handler {
+	fallback := newHarnessTransportProxy(target)
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+			fallback.ServeHTTP(writer, request)
+			return
 		}
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			http.Error(writer, "websocket bridge unavailable", http.StatusInternalServerError)
+			return
+		}
+		clientConnection, clientBuffer, err := hijacker.Hijack()
+		if err != nil {
+			return
+		}
+		upstreamConnection, err := net.DialTimeout("tcp", target.Host, 5*time.Second)
+		if err != nil {
+			_ = clientConnection.Close()
+			return
+		}
+
+		upstreamRequest := request.Clone(request.Context())
+		upstreamRequest.RequestURI = ""
+		upstreamRequest.URL.Scheme = ""
+		upstreamRequest.URL.Host = ""
+		upstreamRequest.Host = target.Host
+		if upstreamRequest.Header.Get("Origin") != "" {
+			upstreamRequest.Header.Set("Origin", target.Scheme+"://"+target.Host)
+		}
+		upstreamRequest.Header.Set("Sec-Fetch-Site", "same-origin")
+		upstreamRequest.Header.Set("Sec-Fetch-Mode", "websocket")
+		upstreamRequest.Header.Set("Sec-Fetch-Dest", "websocket")
+		if err := upstreamRequest.Write(upstreamConnection); err != nil {
+			_ = upstreamConnection.Close()
+			_ = clientConnection.Close()
+			return
+		}
+		if buffered := clientBuffer.Reader.Buffered(); buffered > 0 {
+			if _, err := io.CopyN(upstreamConnection, clientBuffer, int64(buffered)); err != nil {
+				_ = upstreamConnection.Close()
+				_ = clientConnection.Close()
+				return
+			}
+		}
+		upstreamReader := bufio.NewReader(upstreamConnection)
+		var responseHeader bytes.Buffer
+		for {
+			line, readErr := upstreamReader.ReadString('\n')
+			if readErr != nil {
+				_ = upstreamConnection.Close()
+				_ = clientConnection.Close()
+				return
+			}
+			responseHeader.WriteString(line)
+			if line == "\r\n" {
+				break
+			}
+		}
+		if _, err := clientConnection.Write(responseHeader.Bytes()); err != nil {
+			_ = upstreamConnection.Close()
+			_ = clientConnection.Close()
+			return
+		}
+		go func() {
+			_, _ = io.Copy(upstreamConnection, clientConnection)
+			_ = upstreamConnection.Close()
+		}()
+		_, _ = io.Copy(clientConnection, upstreamReader)
+		_ = clientConnection.Close()
+	})
+}
+
+func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase string) *httputil.ReverseProxy {
+	proxy := newHarnessTransportProxy(target)
+	proxy.ModifyResponse = func(response *http.Response) error {
 		if response.Request.URL.Path != "/" || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/html") {
 			return nil
 		}
@@ -137,13 +229,55 @@ func newHarnessReverseProxy(target *url.URL, platform string) *httputil.ReverseP
 			return err
 		}
 		_ = response.Body.Close()
-		body = injectDesktopChrome(body, platform)
+		body = injectDesktopSessionRestore(body, bridgeWebSocketBase)
+		if platform == "darwin" || platform == "windows" {
+			body = injectDesktopChrome(body, platform)
+		}
 		response.Body = io.NopCloser(bytes.NewReader(body))
 		response.ContentLength = int64(len(body))
 		response.Header.Set("Content-Length", strconv.Itoa(len(body)))
 		return nil
 	}
 	return proxy
+}
+
+func injectDesktopSessionRestore(document []byte, bridgeWebSocketBase string) []byte {
+	script := []byte(fmt.Sprintf(`<script id="dsh-desktop-session-restore">(() => {
+try {
+  const bridgeBase = %s;
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = new Proxy(NativeWebSocket, {
+    construct(Target, args) {
+      try {
+        const url = new URL(String(args[0]), window.location.href);
+        if (url.protocol === "wails:" && url.pathname.startsWith("/api/")) {
+          args[0] = bridgeBase + url.pathname + url.search + url.hash;
+        }
+      } catch (error) {
+        console.warn("DeepSeek Harness Desktop could not bridge a WebSocket", error);
+      }
+      return Reflect.construct(Target, args);
+    }
+  });
+  const key = "dsh.sessions.current";
+  const stored = JSON.parse(localStorage.getItem(key) || "{}");
+  if (typeof stored.sessionId === "string" && stored.sessionId.length > 0) return;
+  const request = new XMLHttpRequest();
+  request.open("POST", "/api/session.list", false);
+  request.setRequestHeader("Content-Type", "application/json");
+  request.send(JSON.stringify({type:"client-request",rpcId:"desktop-session-restore",method:"session.list",payload:{}}));
+  if (request.status < 200 || request.status >= 300) return;
+  const response = JSON.parse(request.responseText);
+  const items = response?.result?.ok === true ? response.result.value?.items : undefined;
+  if (!Array.isArray(items)) return;
+  const selected = items.filter((item) => item && item.blank !== true && typeof item.sessionId === "string")
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))[0];
+  if (selected) localStorage.setItem(key, JSON.stringify({sessionId:selected.sessionId}));
+} catch (error) {
+  console.warn("DeepSeek Harness Desktop could not restore the recent session", error);
+}
+})()</script>`, strconv.Quote(bridgeWebSocketBase)))
+	return injectBeforeClosingBody(document, script)
 }
 
 func injectDesktopChrome(document []byte, platform string) []byte {
@@ -164,15 +298,19 @@ body[data-ds-dark-theme] #dsh-desktop-titlebar{background:rgba(20,20,20,.76);bor
 #dsh-desktop-window-controls button{width:38px;height:32px;border:0;border-radius:0;background:transparent;color:inherit;font:15px/1 system-ui;cursor:default}
 #dsh-desktop-window-controls button:hover{background:rgba(127,127,127,.18)}#dsh-desktop-window-controls button.close:hover{background:#c42b1c;color:#fff}
 </style><div id="dsh-desktop-titlebar"><div id="dsh-desktop-drag-region" aria-hidden="true"></div>%s</div>`, chromeHeight, chromeHeight, chromeHeight, map[string]string{"darwin": "78px", "windows": "8px"}[platform], dragRight, controls)
+	return injectBeforeClosingBody(document, []byte(chrome))
+}
+
+func injectBeforeClosingBody(document, content []byte) []byte {
 	closingBody := []byte("</body>")
 	if index := bytes.LastIndex(document, closingBody); index >= 0 {
-		result := make([]byte, 0, len(document)+len(chrome))
+		result := make([]byte, 0, len(document)+len(content))
 		result = append(result, document[:index]...)
-		result = append(result, chrome...)
+		result = append(result, content...)
 		result = append(result, document[index:]...)
 		return result
 	}
-	return append(document, chrome...)
+	return append(document, content...)
 }
 
 func waitForHarness(address string, command *exec.Cmd, timeout time.Duration) error {
