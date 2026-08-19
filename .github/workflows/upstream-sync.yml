@@ -1,0 +1,25 @@
+name: Check DeepSeek Harness upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 2 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: ./scripts/update-upstream.sh --ref master
+      - uses: peter-evans/create-pull-request@v7
+        if: success()
+        with:
+          branch: bot/update-deepseek-harness
+          title: 'chore: update DeepSeek Harness upstream'
+          commit-message: 'chore: update DeepSeek Harness upstream'
+          body: 'Automated non-breaking upstream metadata update. Runtime packages rebuild from the pinned npm version.'
