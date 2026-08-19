@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -96,7 +99,7 @@ func (a *App) startHarness() error {
 	if err := waitForHarness(target.String(), a.command, 90*time.Second); err != nil {
 		return fmt.Errorf("%w; log: %s", err, logPath)
 	}
-	a.proxy.Ready(newHarnessReverseProxy(target))
+	a.proxy.Ready(newHarnessReverseProxy(target, runtime.GOOS))
 	go func() {
 		if waitErr := a.command.Wait(); waitErr != nil {
 			a.proxy.Fail(fmt.Errorf("dsh exited: %w; log: %s", waitErr, logPath))
@@ -105,17 +108,65 @@ func (a *App) startHarness() error {
 	return nil
 }
 
-func newHarnessReverseProxy(target *url.URL) *httputil.ReverseProxy {
+func newHarnessReverseProxy(target *url.URL, platform string) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	director := proxy.Director
 	proxy.Director = func(request *http.Request) {
 		director(request)
 		request.Host = target.Host
+		request.Header.Del("Accept-Encoding")
 		if request.Header.Get("Origin") != "" {
 			request.Header.Set("Origin", target.Scheme+"://"+target.Host)
 		}
 	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if platform != "darwin" && platform != "windows" {
+			return nil
+		}
+		if response.Request.URL.Path != "/" || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/html") {
+			return nil
+		}
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			return err
+		}
+		_ = response.Body.Close()
+		body = injectDesktopChrome(body, platform)
+		response.Body = io.NopCloser(bytes.NewReader(body))
+		response.ContentLength = int64(len(body))
+		response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		return nil
+	}
 	return proxy
+}
+
+func injectDesktopChrome(document []byte, platform string) []byte {
+	controls := ""
+	dragRight := "8px"
+	chromeHeight := "44px"
+	if platform == "windows" {
+		dragRight = "116px"
+		chromeHeight = "32px"
+		controls = `<div id="dsh-desktop-window-controls"><button type="button" aria-label="Minimise" onclick="window.runtime?.WindowMinimise?.()">&#8722;</button><button type="button" aria-label="Maximise" onclick="window.runtime?.WindowToggleMaximise?.()">&#9723;</button><button class="close" type="button" aria-label="Close" onclick="window.runtime?.Quit?.()">&#215;</button></div>`
+	}
+	chrome := fmt.Sprintf(`<style id="dsh-desktop-chrome-style">
+html,body{overflow:hidden!important}body{padding-top:%s!important;box-sizing:border-box!important}#root{height:calc(100vh - %s)!important;min-height:0!important}
+#dsh-desktop-titlebar{position:fixed;inset:0 0 auto 0;height:%s;z-index:2147483646;pointer-events:none;background:rgba(248,248,248,.78);border-bottom:1px solid rgba(0,0,0,.08);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+body[data-ds-dark-theme] #dsh-desktop-titlebar{background:rgba(20,20,20,.76);border-bottom-color:rgba(255,255,255,.08)}
+#dsh-desktop-drag-region{position:absolute;top:0;bottom:0;left:%s;right:%s;pointer-events:auto;user-select:none;--wails-draggable:drag}
+#dsh-desktop-window-controls{position:absolute;top:0;right:0;height:32px;display:flex;pointer-events:auto;--wails-draggable:no-drag}
+#dsh-desktop-window-controls button{width:38px;height:32px;border:0;border-radius:0;background:transparent;color:inherit;font:15px/1 system-ui;cursor:default}
+#dsh-desktop-window-controls button:hover{background:rgba(127,127,127,.18)}#dsh-desktop-window-controls button.close:hover{background:#c42b1c;color:#fff}
+</style><div id="dsh-desktop-titlebar"><div id="dsh-desktop-drag-region" aria-hidden="true"></div>%s</div>`, chromeHeight, chromeHeight, chromeHeight, map[string]string{"darwin": "78px", "windows": "8px"}[platform], dragRight, controls)
+	closingBody := []byte("</body>")
+	if index := bytes.LastIndex(document, closingBody); index >= 0 {
+		result := make([]byte, 0, len(document)+len(chrome))
+		result = append(result, document[:index]...)
+		result = append(result, chrome...)
+		result = append(result, document[index:]...)
+		return result
+	}
+	return append(document, chrome...)
 }
 
 func waitForHarness(address string, command *exec.Cmd, timeout time.Duration) error {

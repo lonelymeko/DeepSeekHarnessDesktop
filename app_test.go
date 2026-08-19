@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestHarnessProxyNormalizesWebViewAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyServer := httptest.NewServer(newHarnessReverseProxy(target))
+	proxyServer := httptest.NewServer(newHarnessReverseProxy(target, "linux"))
 	defer proxyServer.Close()
 
 	request, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/api/settings.describe", nil)
@@ -41,5 +42,22 @@ func TestHarnessProxyNormalizesWebViewAuthority(t *testing.T) {
 	want := target.Host + "\n" + target.Scheme + "://" + target.Host
 	if string(body) != want {
 		t.Fatalf("normalized headers = %q, want %q", body, want)
+	}
+}
+
+func TestInjectDesktopChrome(t *testing.T) {
+	document := []byte("<!doctype html><body><div id=\"root\"></div></body>")
+	mac := string(injectDesktopChrome(document, "darwin"))
+	if !strings.Contains(mac, `id="dsh-desktop-drag-region"`) || strings.Contains(mac, `<div id="dsh-desktop-window-controls"`) {
+		t.Fatalf("mac chrome was not injected correctly: %s", mac)
+	}
+	if !strings.Contains(mac, "padding-top:44px") {
+		t.Fatalf("mac chrome does not reserve traffic-light clearance: %s", mac)
+	}
+	windows := string(injectDesktopChrome(document, "windows"))
+	for _, expected := range []string{"dsh-desktop-drag-region", "dsh-desktop-window-controls", "WindowToggleMaximise", "window.runtime?.Quit"} {
+		if !strings.Contains(windows, expected) {
+			t.Fatalf("windows chrome lacks %q", expected)
+		}
 	}
 }

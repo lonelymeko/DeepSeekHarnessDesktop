@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"sync"
 
@@ -64,9 +65,12 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Handler: proxy,
 		},
-		OnStartup:        app.startup,
-		OnShutdown:       app.shutdown,
-		Bind:             []interface{}{app},
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
+		Bind:       []interface{}{app},
+		Debug: options.Debug{
+			OpenInspectorOnStartup: os.Getenv("DSH_DESKTOP_DEVTOOLS") == "1",
+		},
 		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0},
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
@@ -82,6 +86,7 @@ func main() {
 	}
 	if runtime.GOOS == "windows" {
 		appOptions.BackgroundColour = &options.RGBA{R: 18, G: 18, B: 18, A: 1}
+		appOptions.Frameless = true
 	}
 	err := wails.Run(appOptions)
 	if err != nil {
