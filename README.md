@@ -5,6 +5,8 @@
 
 本项目不把 Harness 逻辑重写成不完整的 Web 副本，而是随应用携带官方 `@deepseek-ai/dsh` npm 发行包和独立 Node.js 运行时。Wails 启动本机 Harness 服务，并通过同源反向代理显示完整 Web UI，因此插件安装、工作区文件、终端、WebSocket、文档和产物下载仍走官方实现。
 
+反向代理会把 Wails WebView 的内部 `wails.localhost` Host/Origin 规范化为 Harness 实际监听的 loopback 地址，满足上游 DNS-rebinding / cross-site 安全栅栏；macOS 使用与 Suzaku 相同的隐藏内嵌透明标题栏，保留原生红绿灯和圆角。
+
 > DeepSeek Harness 当前仍是 developer preview。上游明确会出现破坏性更新，本仓库因此默认拒绝自动接受关键启动契约的变化。
 
 ## 环境

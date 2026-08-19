@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"runtime"
 	"sync"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 type HarnessProxy struct {
@@ -52,7 +55,7 @@ func (p *HarnessProxy) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 func main() {
 	proxy := NewHarnessProxy()
 	app := NewApp(proxy)
-	err := wails.Run(&options.App{
+	appOptions := &options.App{
 		Title:     "DeepSeek Harness Desktop",
 		Width:     1440,
 		Height:    920,
@@ -61,10 +64,26 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Handler: proxy,
 		},
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
-		Bind:       []interface{}{app},
-	})
+		OnStartup:        app.startup,
+		OnShutdown:       app.shutdown,
+		Bind:             []interface{}{app},
+		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0},
+		Windows: &windows.Options{
+			WebviewIsTransparent: false,
+			WindowIsTranslucent:  false,
+			IsZoomControlEnabled: true,
+		},
+		Mac: &mac.Options{
+			TitleBar:             mac.TitleBarHiddenInset(),
+			WebviewIsTransparent: true,
+			WindowIsTranslucent:  true,
+			Appearance:           mac.NSAppearanceNameDarkAqua,
+		},
+	}
+	if runtime.GOOS == "windows" {
+		appOptions.BackgroundColour = &options.RGBA{R: 18, G: 18, B: 18, A: 1}
+	}
+	err := wails.Run(appOptions)
 	if err != nil {
 		panic(err)
 	}

@@ -96,13 +96,26 @@ func (a *App) startHarness() error {
 	if err := waitForHarness(target.String(), a.command, 90*time.Second); err != nil {
 		return fmt.Errorf("%w; log: %s", err, logPath)
 	}
-	a.proxy.Ready(httputil.NewSingleHostReverseProxy(target))
+	a.proxy.Ready(newHarnessReverseProxy(target))
 	go func() {
 		if waitErr := a.command.Wait(); waitErr != nil {
 			a.proxy.Fail(fmt.Errorf("dsh exited: %w; log: %s", waitErr, logPath))
 		}
 	}()
 	return nil
+}
+
+func newHarnessReverseProxy(target *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(request *http.Request) {
+		director(request)
+		request.Host = target.Host
+		if request.Header.Get("Origin") != "" {
+			request.Header.Set("Origin", target.Scheme+"://"+target.Host)
+		}
+	}
+	return proxy
 }
 
 func waitForHarness(address string, command *exec.Cmd, timeout time.Duration) error {
