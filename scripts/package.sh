@@ -46,9 +46,12 @@ case "$GOOS_TARGET" in
     cp "$ROOT/build/bin/DeepSeekHarnessDesktop.exe" "$STAGING/"
     cp -R "$ROOT/runtime/current" "$STAGING/runtime"
     installer="$ROOT/build/bin/DeepSeekHarnessDesktop-${GOARCH_TARGET}-installer.exe"
-    if [[ -f "$installer" ]]; then
-      cp "$installer" "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}-installer.exe"
+    if [[ ! -f "$installer" ]]; then
+      echo "NSIS installer missing after Wails build: $installer" >&2
+      echo "Ensure makensis is installed and available on PATH." >&2
+      exit 1
     fi
+    cp "$installer" "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}-installer.exe"
     if command -v ditto >/dev/null 2>&1; then
       ditto -c -k --sequesterRsrc --keepParent "$STAGING" "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip"
     elif command -v 7z >/dev/null 2>&1; then
