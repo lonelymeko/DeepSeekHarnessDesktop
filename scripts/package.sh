@@ -42,6 +42,15 @@ case "$GOOS_TARGET" in
     tar -C "$STAGING" -czf "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.tar.gz" .
     ;;
   windows)
+    nsis_runtime_dir="$ROOT/.cache/nsis"
+    nsis_runtime_archive="$nsis_runtime_dir/runtime.zip"
+    rm -rf "$nsis_runtime_dir"
+    mkdir -p "$nsis_runtime_dir"
+    if ! command -v 7z >/dev/null 2>&1; then
+      echo "7z is required to prepare the NSIS runtime archive." >&2
+      exit 1
+    fi
+    (cd "$ROOT/runtime/current" && 7z a -tzip -mx=5 "$nsis_runtime_archive" . >/dev/null)
     wails build -clean -platform "$TARGET" -nsis
     cp "$ROOT/build/bin/DeepSeekHarnessDesktop.exe" "$STAGING/"
     cp -R "$ROOT/runtime/current" "$STAGING/runtime"

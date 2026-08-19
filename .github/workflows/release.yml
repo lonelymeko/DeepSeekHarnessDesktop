@@ -8,7 +8,15 @@ on:
         required: true
         default: 0.1.0
   push:
+    branches: [main]
     tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-desktop-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   package:
@@ -45,12 +53,66 @@ jobs:
           & "$nsisPath\makensis.exe" /VERSION
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
+      - name: Resolve package version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version='${{ inputs.version }}'
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="continuous"
+          fi
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Package
         shell: bash
         env:
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION: ${{ env.PACKAGE_VERSION }}
         run: ./scripts/package.sh '${{ matrix.target }}'
       - uses: actions/upload-artifact@v4
         with:
           name: DeepSeekHarnessDesktop-${{ runner.os }}
           path: dist-packages/*
+
+  release:
+    if: github.event_name == 'push'
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: DeepSeekHarnessDesktop-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+            title="DeepSeek Harness Desktop $tag"
+            prerelease="false"
+          else
+            tag="continuous"
+            title="DeepSeek Harness Desktop Continuous"
+            prerelease="true"
+            git tag --force "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/$tag" --force
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber
+            gh release edit "$tag" --title "$title" --prerelease="$prerelease" --notes "Automated desktop packages for commit $GITHUB_SHA."
+          else
+            args=(--title "$title" --notes "Automated desktop packages for commit $GITHUB_SHA.")
+            if [[ "$prerelease" == "true" ]]; then
+              args+=(--prerelease)
+            else
+              args+=(--latest)
+            fi
+            gh release create "$tag" release-assets/* "${args[@]}"
+          fi

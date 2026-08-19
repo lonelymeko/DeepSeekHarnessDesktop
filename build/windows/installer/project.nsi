@@ -88,8 +88,17 @@ Section
 
     !insertmacro wails.files
 
-    SetOutPath "$INSTDIR\runtime"
-    File /r "..\..\..\runtime\current\*"
+    SetOutPath $INSTDIR
+    File /oname=runtime.zip "..\..\..\.cache\nsis\runtime.zip"
+
+    RMDir /r "$INSTDIR\runtime"
+    CreateDirectory "$INSTDIR\runtime"
+    ExecWait '"$SYSDIR\tar.exe" -xf "$INSTDIR\runtime.zip" -C "$INSTDIR\runtime"' $0
+    ${If} $0 != 0
+        MessageBox MB_ICONSTOP "Failed to extract the bundled DeepSeek Harness runtime (exit code $0)."
+        Abort
+    ${EndIf}
+    Delete "$INSTDIR\runtime.zip"
 
     SetOutPath $INSTDIR
 
