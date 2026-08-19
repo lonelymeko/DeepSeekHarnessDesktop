@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -59,5 +61,57 @@ func TestInjectDesktopChrome(t *testing.T) {
 		if !strings.Contains(windows, expected) {
 			t.Fatalf("windows chrome lacks %q", expected)
 		}
+	}
+}
+
+func TestMigrateSharedHarnessHomeMovesDataAndCreatesCompatibilityLink(t *testing.T) {
+	root := t.TempDir()
+	legacyHome := filepath.Join(root, ".dsh")
+	desktopHome := filepath.Join(root, "app-data", "dsh")
+	if err := os.MkdirAll(filepath.Join(legacyHome, "sessions", "project"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("existing session memory")
+	dataFile := filepath.Join(legacyHome, "sessions", "project", "session.json")
+	if err := os.WriteFile(dataFile, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gotHome, err := migrateSharedHarnessHome(legacyHome, desktopHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHome != desktopHome {
+		t.Fatalf("shared home = %q, want %q", gotHome, desktopHome)
+	}
+	legacyInfo, err := os.Lstat(legacyHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("legacy home is not a compatibility symlink: %s", legacyHome)
+	}
+	got, err := os.ReadFile(filepath.Join(desktopHome, "sessions", "project", "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("migrated data = %q, want %q", got, want)
+	}
+}
+
+func TestMigrateSharedHarnessHomeRefusesConflictingDirectories(t *testing.T) {
+	root := t.TempDir()
+	legacyHome := filepath.Join(root, ".dsh")
+	desktopHome := filepath.Join(root, "app-data", "dsh")
+	for _, path := range []string{legacyHome, desktopHome} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := migrateSharedHarnessHome(legacyHome, desktopHome)
+	if err == nil || !strings.Contains(err.Error(), "both Harness data directories exist") {
+		t.Fatalf("conflict error = %v", err)
 	}
 }

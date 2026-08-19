@@ -50,6 +50,12 @@ func (a *App) shutdown(context.Context) {
 }
 
 func (a *App) startHarness() error {
+	harnessHome, err := sharedHarnessHome()
+	if err != nil {
+		return fmt.Errorf("prepare shared Harness data directory: %w", err)
+	}
+	log.Printf("DeepSeek Harness data directory: %s", harnessHome)
+
 	root, err := runtimeRoot()
 	if err != nil {
 		return err
@@ -88,7 +94,7 @@ func (a *App) startHarness() error {
 
 	a.command = exec.Command(node, entry, "web", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
 	a.command.Dir = filepath.Join(root, "app")
-	a.command.Env = append(os.Environ(), "DSH_DESKTOP=1")
+	a.command.Env = append(os.Environ(), "DSH_DESKTOP=1", "DSH_HOME="+harnessHome)
 	a.command.Stdout = io.MultiWriter(os.Stdout, a.logFile)
 	a.command.Stderr = io.MultiWriter(os.Stderr, a.logFile)
 	if err := a.command.Start(); err != nil {

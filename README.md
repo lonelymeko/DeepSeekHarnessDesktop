@@ -37,7 +37,22 @@ DSH_DESKTOP_DEVTOOLS=1 make dev
 ```
 
 首次运行会下载固定版本 Node，并安装 `upstream/manifest.json` 固定的 `@deepseek-ai/dsh`。
-Harness 用户数据和插件继续使用官方 `$DSH_HOME` 规则；桌面升级不会删除用户插件。
+
+## 用户数据共用
+
+桌面版、`dsh web` 命令行实例和浏览器中的 Harness 共用同一份项目、会话记忆、设置、凭据和插件：
+
+- macOS：实体目录为 `~/Library/Application Support/DeepSeekHarnessDesktop/dsh`，官方 `~/.dsh` 会自动迁移并替换为指向该目录的兼容链接。
+- Linux：实体目录为 `${XDG_CONFIG_HOME:-~/.config}/DeepSeekHarnessDesktop/dsh`，官方 `~/.dsh` 同样作为兼容链接。
+- Windows：直接使用官方 `%USERPROFILE%\\.dsh`，避免创建链接所需的额外权限。
+
+迁移只移动整个目录，不会拆分或转换内部文件。若检测到旧目录和新目录同时存在，软件会停止启动并输出冲突路径，防止静默覆盖数据。迁移完成后，从桌面版或 `dsh web` 安装插件、打开项目和创建会话都会立即作用于同一份数据。
+
+如需显式指定其他共享目录，可设置：
+
+```sh
+export DSH_DESKTOP_HOME=/path/to/shared/dsh
+```
 
 ## 一键打包
 
