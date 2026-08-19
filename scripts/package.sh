@@ -30,7 +30,7 @@ case "$GOOS_TARGET" in
     hdiutil create -volname "DeepSeek Harness Desktop" -srcfolder "$STAGING" -ov -format UDZO "$DMG"
     ;;
   linux)
-    wails build -clean -platform "$TARGET"
+    wails build -clean -platform "$TARGET" -tags webkit2_41
     cp "$ROOT/build/bin/DeepSeekHarnessDesktop" "$STAGING/"
     cp -R "$ROOT/runtime/current" "$STAGING/runtime"
     tar -C "$STAGING" -czf "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.tar.gz" .
@@ -45,6 +45,8 @@ case "$GOOS_TARGET" in
     fi
     if command -v ditto >/dev/null 2>&1; then
       ditto -c -k --sequesterRsrc --keepParent "$STAGING" "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip"
+    elif command -v 7z >/dev/null 2>&1; then
+      (cd "$STAGING" && 7z a -tzip "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip" .)
     else
       (cd "$STAGING" && zip -qr "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip" .)
     fi

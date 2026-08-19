@@ -56,6 +56,7 @@ TARGET=windows/amd64 make package
 ```
 
 不同操作系统的 Wails/WebView 原生依赖不能可靠地在单机交叉打包；`.github/workflows/release.yml` 使用 macOS、Ubuntu、Windows 原生 runner 一键生成三平台产物。
+Linux 使用 Ubuntu 24.04 的 WebKitGTK 4.1，并通过 Wails 的 `webkit2_41` 构建标签编译；Windows workflow 会安装 NSIS 后生成完整安装器。
 
 ## 一键更新上游
 
