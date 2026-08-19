@@ -26,7 +26,8 @@ case "$GOOS_TARGET" in
       chmod -R u+w "$APP/Contents/Resources/runtime" 2>/dev/null || true
       rm -rf "$APP/Contents/Resources/runtime"
     fi
-    ditto "$ROOT/runtime/current" "$APP/Contents/Resources/runtime"
+    mkdir -p "$APP/Contents/Resources/runtime"
+    tar -C "$ROOT/runtime/current" -cf - . | tar -C "$APP/Contents/Resources/runtime" -xf -
     codesign --force --deep --sign - "$APP"
     cp -R "$APP" "$STAGING/"
     ln -s /Applications "$STAGING/Applications"
