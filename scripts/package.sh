@@ -20,8 +20,13 @@ case "$GOOS_TARGET" in
     wails build -clean -platform "$TARGET"
     APP="$ROOT/build/bin/DeepSeekHarnessDesktop.app"
     mkdir -p "$APP/Contents/Resources"
-    rm -rf "$APP/Contents/Resources/runtime"
-    cp -R "$ROOT/runtime/current" "$APP/Contents/Resources/runtime"
+    if [[ -e "$APP/Contents/Resources/runtime" ]]; then
+      chflags -R nouchg,noschg "$APP/Contents/Resources/runtime" 2>/dev/null || true
+      chmod -RN "$APP/Contents/Resources/runtime" 2>/dev/null || true
+      chmod -R u+w "$APP/Contents/Resources/runtime" 2>/dev/null || true
+      rm -rf "$APP/Contents/Resources/runtime"
+    fi
+    ditto "$ROOT/runtime/current" "$APP/Contents/Resources/runtime"
     codesign --force --deep --sign - "$APP"
     cp -R "$APP" "$STAGING/"
     ln -s /Applications "$STAGING/Applications"
