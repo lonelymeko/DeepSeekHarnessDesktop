@@ -90,6 +90,16 @@ Linux 使用 Ubuntu 24.04 的 WebKitGTK 4.1，并通过 Wails 的 `webkit2_41` �
 - 手动运行 workflow：只生成 Actions artifacts，适合验证指定版本，不会覆盖公开 Release。
 - Windows 构建强制要求 NSIS 安装器存在；若 `makensis.exe` 不可用，任务会失败并阻止发版。
 
+### 自动更新
+
+应用启动后会自动查询本仓库的 GitHub Releases，并每 6 小时复查一次：
+
+- `continuous` 构建跟随 `continuous` 预发布，通过构建提交判断是否有新版本。
+- `v*` 正式版本只跟随 GitHub 标记的 latest 正式 Release，并按版本号比较。
+- 更新包按当前平台选择 macOS DMG、Windows NSIS 安装器或 Linux tar.gz。
+- 下载完成前必须通过 GitHub Release 资产提供的 SHA-256 摘要校验，并限制为本仓库对应 Release 的 HTTPS 下载地址。
+- 发现更新后由用户确认下载；Windows 会打开安装器并退出当前应用，macOS 会打开 DMG，Linux 会打开下载的归档包。
+
 ## 一键更新上游
 
 ```sh

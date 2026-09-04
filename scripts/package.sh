@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 TARGET="${1:-$(go env GOOS)/$(go env GOARCH)}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.1.1}"
+BUILD_COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+BUILD_LDFLAGS="-X main.desktopVersion=$VERSION -X main.desktopCommit=$BUILD_COMMIT"
 GOOS_TARGET="${TARGET%/*}"
 GOARCH_TARGET="${TARGET#*/}"
 OUTPUT="$ROOT/dist-packages"
@@ -17,7 +19,7 @@ mkdir -p "$OUTPUT" "$STAGING"
 
 case "$GOOS_TARGET" in
   darwin)
-    wails build -clean -platform "$TARGET"
+    wails build -clean -platform "$TARGET" -ldflags "$BUILD_LDFLAGS"
     APP="$ROOT/build/bin/DeepSeekHarnessDesktop.app"
     mkdir -p "$APP/Contents/Resources"
     if [[ -e "$APP/Contents/Resources/runtime" ]]; then
@@ -36,7 +38,7 @@ case "$GOOS_TARGET" in
     hdiutil create -volname "DeepSeek Harness Desktop" -srcfolder "$STAGING" -ov -format UDZO "$DMG"
     ;;
   linux)
-    wails build -clean -platform "$TARGET" -tags webkit2_41
+    wails build -clean -platform "$TARGET" -tags webkit2_41 -ldflags "$BUILD_LDFLAGS"
     cp "$ROOT/build/bin/DeepSeekHarnessDesktop" "$STAGING/"
     cp -R "$ROOT/runtime/current" "$STAGING/runtime"
     tar -C "$STAGING" -czf "$OUTPUT/DeepSeekHarnessDesktop-${VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.tar.gz" .
@@ -51,7 +53,7 @@ case "$GOOS_TARGET" in
       exit 1
     fi
     (cd "$ROOT/runtime/current" && 7z a -tzip -mx=5 "$nsis_runtime_archive" . >/dev/null)
-    wails build -clean -platform "$TARGET" -nsis
+    wails build -clean -platform "$TARGET" -nsis -ldflags "$BUILD_LDFLAGS"
     cp "$ROOT/build/bin/DeepSeekHarnessDesktop.exe" "$STAGING/"
     cp -R "$ROOT/runtime/current" "$STAGING/runtime"
     installer="$ROOT/build/bin/DeepSeekHarnessDesktop-${GOARCH_TARGET}-installer.exe"

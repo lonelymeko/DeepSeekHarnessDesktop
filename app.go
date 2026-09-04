@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type App struct {
@@ -27,6 +29,7 @@ type App struct {
 	proxy    *HarnessProxy
 	logFile  *os.File
 	bridge   *http.Server
+	updater  *releaseUpdater
 	stopOnce sync.Once
 }
 
@@ -81,7 +84,27 @@ func authenticatedHarnessURL(line string, target *url.URL) *url.URL {
 	return address
 }
 
-func NewApp(proxy *HarnessProxy) *App { return &App{proxy: proxy} }
+func NewApp(proxy *HarnessProxy) *App { return &App{proxy: proxy, updater: newReleaseUpdater()} }
+
+func (a *App) CheckForUpdate() (UpdateInfo, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.updater.check(ctx)
+}
+
+func (a *App) DownloadAndOpenUpdate() (string, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.updater.downloadAndOpen(ctx, func(progress UpdateDownloadProgress) {
+		if a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "desktop:update-progress", progress)
+		}
+	})
+}
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -316,6 +339,7 @@ func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase, brow
 		}
 		_ = response.Body.Close()
 		body = injectDesktopSessionRestore(body, bridgeWebSocketBase)
+		body = injectDesktopUpdater(body)
 		if platform == "darwin" || platform == "windows" {
 			body = injectDesktopChrome(body, platform)
 		}
@@ -366,6 +390,116 @@ try {
 }
 })()</script>`, strconv.Quote(bridgeWebSocketBase)))
 	return injectBeforeClosingBody(document, script)
+}
+
+func injectDesktopUpdater(document []byte) []byte {
+	content := []byte(`<style id="dsh-desktop-updater-style">
+#dsh-desktop-update{position:fixed;right:20px;bottom:20px;z-index:2147483645;width:min(360px,calc(100vw - 40px));box-sizing:border-box;padding:16px;background:#fff;color:#191919;border:1px solid rgba(0,0,0,.12);border-radius:8px;box-shadow:0 12px 34px rgba(0,0,0,.22);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:0}
+#dsh-desktop-update[hidden]{display:none}body[data-ds-dark-theme] #dsh-desktop-update{background:#242424;color:#f5f5f5;border-color:rgba(255,255,255,.14)}
+#dsh-desktop-update-title{margin:0 0 4px;font-size:16px;font-weight:650;letter-spacing:0}#dsh-desktop-update-detail{margin:0;color:#666;overflow-wrap:anywhere}body[data-ds-dark-theme] #dsh-desktop-update-detail{color:#b9b9b9}
+#dsh-desktop-update-status{min-height:20px;margin:10px 0 0;color:#555;overflow-wrap:anywhere}body[data-ds-dark-theme] #dsh-desktop-update-status{color:#c7c7c7}
+#dsh-desktop-update-progress{height:4px;margin-top:8px;overflow:hidden;background:rgba(127,127,127,.22);border-radius:2px}#dsh-desktop-update-progress[hidden]{display:none}#dsh-desktop-update-progress>span{display:block;width:0;height:100%;background:#16865b;transition:width .18s ease}
+#dsh-desktop-update-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}#dsh-desktop-update button{min-height:34px;padding:6px 12px;border:1px solid rgba(0,0,0,.16);border-radius:6px;background:transparent;color:inherit;font:600 13px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:0;cursor:pointer}body[data-ds-dark-theme] #dsh-desktop-update button{border-color:rgba(255,255,255,.2)}#dsh-desktop-update button:hover{background:rgba(127,127,127,.12)}#dsh-desktop-update button:disabled{cursor:default;opacity:.58}#dsh-desktop-update-install{border-color:#147653!important;background:#16865b!important;color:#fff!important}#dsh-desktop-update-install:hover{background:#147653!important}
+</style><aside id="dsh-desktop-update" role="status" aria-live="polite" hidden><h2 id="dsh-desktop-update-title">DeepSeek Harness Desktop 有更新</h2><p id="dsh-desktop-update-detail"></p><p id="dsh-desktop-update-status"></p><div id="dsh-desktop-update-progress" hidden><span></span></div><div id="dsh-desktop-update-actions"><button id="dsh-desktop-update-notes" type="button">发布说明</button><button id="dsh-desktop-update-later" type="button">稍后</button><button id="dsh-desktop-update-install" type="button">下载更新</button></div></aside>
+<script id="dsh-desktop-updater">(() => {
+const panel = document.getElementById("dsh-desktop-update");
+if (!panel) return;
+const detail = document.getElementById("dsh-desktop-update-detail");
+const status = document.getElementById("dsh-desktop-update-status");
+const progressBox = document.getElementById("dsh-desktop-update-progress");
+const progressBar = progressBox.firstElementChild;
+const install = document.getElementById("dsh-desktop-update-install");
+const later = document.getElementById("dsh-desktop-update-later");
+const notes = document.getElementById("dsh-desktop-update-notes");
+let update = null;
+let removeProgressListener = null;
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function updaterAPI() {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const candidate = window.go && window.go.main && window.go.main.App;
+    if (candidate && candidate.CheckForUpdate && candidate.DownloadAndOpenUpdate) return candidate;
+    await wait(250);
+  }
+  return null;
+}
+function updateKey(info) {
+  return "dsh.desktop.update.dismissed." + (info.releaseCommit || info.latestVersion || "unknown");
+}
+function formatSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  return " · " + (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+async function checkForUpdate() {
+  const api = await updaterAPI();
+  if (!api) return;
+  try {
+    const info = await api.CheckForUpdate();
+    if (!info || !info.available || localStorage.getItem(updateKey(info)) === "1") return;
+    update = info;
+    const latest = info.channel === "continuous" && info.releaseCommit ? "continuous " + info.releaseCommit.slice(0, 7) : "v" + info.latestVersion;
+    detail.textContent = info.currentVersion + " → " + latest + formatSize(Number(info.assetSize));
+    status.textContent = "";
+    panel.hidden = false;
+  } catch (error) {
+    console.warn("DeepSeek Harness Desktop update check failed", error);
+  }
+}
+later.addEventListener("click", () => {
+  if (update) localStorage.setItem(updateKey(update), "1");
+  panel.hidden = true;
+});
+notes.addEventListener("click", () => {
+  if (update && update.releaseUrl && window.runtime && window.runtime.BrowserOpenURL) window.runtime.BrowserOpenURL(update.releaseUrl);
+});
+install.addEventListener("click", async () => {
+  const api = await updaterAPI();
+  if (!api || !update) return;
+  install.disabled = true;
+  later.disabled = true;
+  notes.disabled = true;
+  install.textContent = "下载中";
+  status.textContent = "正在准备更新…";
+  progressBox.hidden = false;
+  if (window.runtime && window.runtime.EventsOn) {
+    removeProgressListener = window.runtime.EventsOn("desktop:update-progress", (item) => {
+      const percent = Math.max(0, Math.min(100, Number(item && item.percent) || 0));
+      progressBar.style.width = percent + "%";
+      status.textContent = "正在下载更新 " + percent + "%";
+    });
+  }
+  try {
+    await api.DownloadAndOpenUpdate();
+    progressBar.style.width = "100%";
+    install.hidden = true;
+    later.disabled = false;
+    later.textContent = "关闭";
+    notes.disabled = false;
+    if (String(update.platform).startsWith("windows/")) {
+      status.textContent = "安装器已打开，应用即将退出。";
+      setTimeout(() => window.runtime && window.runtime.Quit && window.runtime.Quit(), 1200);
+    } else if (String(update.platform).startsWith("darwin/")) {
+      status.textContent = "磁盘映像已打开，可安装新版本。";
+    } else {
+      status.textContent = "更新包已下载并打开。";
+    }
+  } catch (error) {
+    status.textContent = "更新失败：" + String(error && error.message ? error.message : error);
+    install.disabled = false;
+    install.textContent = "重试";
+    later.disabled = false;
+    notes.disabled = false;
+    progressBox.hidden = true;
+  } finally {
+    if (removeProgressListener) {
+      removeProgressListener();
+      removeProgressListener = null;
+    }
+  }
+});
+setTimeout(checkForUpdate, 3000);
+setInterval(checkForUpdate, 6 * 60 * 60 * 1000);
+})()</script>`)
+	return injectBeforeClosingBody(document, content)
 }
 
 func injectDesktopChrome(document []byte, platform string) []byte {

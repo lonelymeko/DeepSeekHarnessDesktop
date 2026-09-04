@@ -205,6 +205,27 @@ func TestInjectDesktopSessionRestore(t *testing.T) {
 	}
 }
 
+func TestInjectDesktopUpdater(t *testing.T) {
+	document := []byte("<!doctype html><body><div id=\"root\"></div></body>")
+	result := string(injectDesktopUpdater(document))
+	for _, expected := range []string{
+		`id="dsh-desktop-update"`,
+		`CheckForUpdate`,
+		`DownloadAndOpenUpdate`,
+		`desktop:update-progress`,
+		`window.runtime.BrowserOpenURL`,
+		`setInterval(checkForUpdate, 6 * 60 * 60 * 1000)`,
+		`下载更新`,
+	} {
+		if !strings.Contains(result, expected) {
+			t.Fatalf("desktop updater lacks %q: %s", expected, result)
+		}
+	}
+	if strings.Index(result, `dsh-desktop-updater`) > strings.Index(result, `</body>`) {
+		t.Fatalf("desktop updater must run before closing body: %s", result)
+	}
+}
+
 func TestMigrateSharedHarnessHomeMovesDataAndCreatesCompatibilityLink(t *testing.T) {
 	root := t.TempDir()
 	legacyHome := filepath.Join(root, ".dsh")
