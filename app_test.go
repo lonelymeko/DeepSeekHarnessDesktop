@@ -181,10 +181,12 @@ func TestInjectDesktopChrome(t *testing.T) {
 }
 
 func TestInjectDesktopSessionRestore(t *testing.T) {
-	document := []byte("<!doctype html><body><div id=\"root\"></div></body>")
+	document := []byte("<!doctype html><head><script type=\"module\" src=\"/app.js\"></script></head><body><div id=\"root\"></div></body>")
 	result := string(injectDesktopSessionRestore(document, "ws://127.0.0.1:45678"))
 	for _, expected := range []string{
 		`id="dsh-desktop-session-restore"`,
+		`globalThis.__DSH_TRANSPORT__`,
+		`{ownsHost:true}`,
 		`const bridgeBase = "ws://127.0.0.1:45678"`,
 		`url.protocol === "wails:"`,
 		`url.protocol === "ws:" && url.host === window.location.host`,
@@ -202,6 +204,9 @@ func TestInjectDesktopSessionRestore(t *testing.T) {
 	}
 	if strings.Index(result, `dsh-desktop-session-restore`) > strings.Index(result, `</body>`) {
 		t.Fatalf("desktop session restore must run before closing body: %s", result)
+	}
+	if strings.Index(result, `globalThis.__DSH_TRANSPORT__`) < strings.Index(result, `type="module"`) {
+		t.Fatalf("the injected classic script should run during parsing before the deferred upstream module executes: %s", result)
 	}
 }
 

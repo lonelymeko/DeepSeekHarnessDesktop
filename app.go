@@ -354,6 +354,7 @@ func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase, brow
 func injectDesktopSessionRestore(document []byte, bridgeWebSocketBase string) []byte {
 	script := []byte(fmt.Sprintf(`<script id="dsh-desktop-session-restore">(() => {
 try {
+  globalThis.__DSH_TRANSPORT__ = Object.assign({}, globalThis.__DSH_TRANSPORT__, {ownsHost:true});
   const bridgeBase = %s;
   const NativeWebSocket = window.WebSocket;
   window.WebSocket = new Proxy(NativeWebSocket, {
