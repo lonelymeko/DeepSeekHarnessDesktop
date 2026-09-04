@@ -30,6 +30,57 @@ type App struct {
 	stopOnce sync.Once
 }
 
+type harnessReadyWriter struct {
+	delegate io.Writer
+	target   *url.URL
+	ready    chan *url.URL
+	mu       sync.Mutex
+	pending  string
+}
+
+func newHarnessReadyWriter(delegate io.Writer, target *url.URL) *harnessReadyWriter {
+	return &harnessReadyWriter{delegate: delegate, target: target, ready: make(chan *url.URL, 1)}
+}
+
+func (writer *harnessReadyWriter) Write(content []byte) (int, error) {
+	written, err := writer.delegate.Write(content)
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.pending += string(content)
+	for {
+		newline := strings.IndexByte(writer.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		line := strings.TrimSpace(writer.pending[:newline])
+		writer.pending = writer.pending[newline+1:]
+		if address := authenticatedHarnessURL(line, writer.target); address != nil {
+			select {
+			case writer.ready <- address:
+			default:
+			}
+		}
+	}
+	return written, err
+}
+
+func authenticatedHarnessURL(line string, target *url.URL) *url.URL {
+	const prefix = "dsh web: "
+	start := strings.Index(line, prefix)
+	if start < 0 {
+		return nil
+	}
+	fields := strings.Fields(line[start+len(prefix):])
+	if len(fields) == 0 {
+		return nil
+	}
+	address, err := url.Parse(fields[0])
+	if err != nil || address.Scheme != target.Scheme || address.Host != target.Host || address.Path != "/" || address.Query().Get("token") == "" {
+		return nil
+	}
+	return address
+}
+
 func NewApp(proxy *HarnessProxy) *App { return &App{proxy: proxy} }
 
 func (a *App) startup(ctx context.Context) {
@@ -97,24 +148,36 @@ func (a *App) startHarness() error {
 		return fmt.Errorf("open runtime log: %w", err)
 	}
 
-	a.command = exec.Command(node, entry, "web", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	output := newHarnessReadyWriter(io.MultiWriter(os.Stdout, a.logFile), target)
+	a.command = exec.Command(node, entry, "web", "--no-open", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
 	a.command.Dir = filepath.Join(root, "app")
 	a.command.Env = append(os.Environ(), "DSH_DESKTOP=1", "DSH_HOME="+harnessHome)
-	a.command.Stdout = io.MultiWriter(os.Stdout, a.logFile)
+	a.command.Stdout = output
 	a.command.Stderr = io.MultiWriter(os.Stderr, a.logFile)
 	if err := a.command.Start(); err != nil {
 		return fmt.Errorf("start dsh: %w", err)
 	}
 
-	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
-	if err := waitForHarness(target.String(), a.command, 90*time.Second); err != nil {
-		return fmt.Errorf("%w; log: %s", err, logPath)
+	exited := make(chan error, 1)
+	go func() { exited <- a.command.Wait() }()
+	var authenticatedURL *url.URL
+	select {
+	case authenticatedURL = <-output.ready:
+	case waitErr := <-exited:
+		return fmt.Errorf("dsh exited before serving HTTP: %w; log: %s", waitErr, logPath)
+	case <-time.After(90 * time.Second):
+		return fmt.Errorf("timed out waiting for %s; log: %s", target, logPath)
+	}
+	browserCookie, err := exchangeHarnessBrowserSession(authenticatedURL)
+	if err != nil {
+		return fmt.Errorf("authenticate desktop browser session: %w; log: %s", err, logPath)
 	}
 	bridgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("start local WebSocket bridge: %w", err)
 	}
-	a.bridge = &http.Server{Handler: newHarnessWebSocketBridge(target)}
+	a.bridge = &http.Server{Handler: newHarnessWebSocketBridge(target, browserCookie)}
 	go func() {
 		if serveErr := a.bridge.Serve(bridgeListener); serveErr != nil && serveErr != http.ErrServerClosed {
 			log.Printf("DeepSeek Harness WebSocket bridge failed: %v", serveErr)
@@ -122,22 +185,44 @@ func (a *App) startHarness() error {
 	}()
 	bridgeWebSocketBase := "ws://" + bridgeListener.Addr().String()
 	log.Printf("DeepSeek Harness WebSocket bridge: %s", bridgeWebSocketBase)
-	a.proxy.Ready(newHarnessReverseProxy(target, runtime.GOOS, bridgeWebSocketBase))
+	a.proxy.Ready(newHarnessReverseProxy(target, runtime.GOOS, bridgeWebSocketBase, browserCookie))
 	go func() {
-		if waitErr := a.command.Wait(); waitErr != nil {
+		if waitErr := <-exited; waitErr != nil {
 			a.proxy.Fail(fmt.Errorf("dsh exited: %w; log: %s", waitErr, logPath))
 		}
 	}()
 	return nil
 }
 
-func newHarnessTransportProxy(target *url.URL) *httputil.ReverseProxy {
+func exchangeHarnessBrowserSession(authenticatedURL *url.URL) (string, error) {
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	response, err := client.Get(authenticatedURL.String())
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		return "", fmt.Errorf("token exchange returned %s", response.Status)
+	}
+	for _, cookie := range response.Cookies() {
+		if strings.HasPrefix(cookie.Name, "dsh-auth-") && cookie.Value != "" {
+			return cookie.Name + "=" + cookie.Value, nil
+		}
+	}
+	return "", fmt.Errorf("token exchange did not return a Harness session cookie")
+}
+
+func newHarnessTransportProxy(target *url.URL, browserCookie string) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	director := proxy.Director
 	proxy.Director = func(request *http.Request) {
 		director(request)
 		request.Host = target.Host
 		request.Header.Del("Accept-Encoding")
+		request.Header.Set("Cookie", browserCookie)
 		if request.Header.Get("Origin") != "" {
 			request.Header.Set("Origin", target.Scheme+"://"+target.Host)
 		}
@@ -145,8 +230,8 @@ func newHarnessTransportProxy(target *url.URL) *httputil.ReverseProxy {
 	return proxy
 }
 
-func newHarnessWebSocketBridge(target *url.URL) http.Handler {
-	fallback := newHarnessTransportProxy(target)
+func newHarnessWebSocketBridge(target *url.URL, browserCookie string) http.Handler {
+	fallback := newHarnessTransportProxy(target, browserCookie)
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if !strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
 			fallback.ServeHTTP(writer, request)
@@ -172,6 +257,7 @@ func newHarnessWebSocketBridge(target *url.URL) http.Handler {
 		upstreamRequest.URL.Scheme = ""
 		upstreamRequest.URL.Host = ""
 		upstreamRequest.Host = target.Host
+		upstreamRequest.Header.Set("Cookie", browserCookie)
 		if upstreamRequest.Header.Get("Origin") != "" {
 			upstreamRequest.Header.Set("Origin", target.Scheme+"://"+target.Host)
 		}
@@ -218,8 +304,8 @@ func newHarnessWebSocketBridge(target *url.URL) http.Handler {
 	})
 }
 
-func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase string) *httputil.ReverseProxy {
-	proxy := newHarnessTransportProxy(target)
+func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase, browserCookie string) http.Handler {
+	proxy := newHarnessTransportProxy(target, browserCookie)
 	proxy.ModifyResponse = func(response *http.Response) error {
 		if response.Request.URL.Path != "/" || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/html") {
 			return nil
@@ -250,7 +336,9 @@ try {
     construct(Target, args) {
       try {
         const url = new URL(String(args[0]), window.location.href);
-        if (url.protocol === "wails:" && url.pathname.startsWith("/api/")) {
+        const isDesktopOrigin = url.protocol === "wails:" ||
+          (url.protocol === "ws:" && url.host === window.location.host);
+        if (isDesktopOrigin && url.pathname.startsWith("/api/")) {
           args[0] = bridgeBase + url.pathname + url.search + url.hash;
         }
       } catch (error) {
@@ -263,9 +351,9 @@ try {
   const stored = JSON.parse(localStorage.getItem(key) || "{}");
   if (typeof stored.sessionId === "string" && stored.sessionId.length > 0) return;
   const request = new XMLHttpRequest();
-  request.open("POST", "/api/session.list", false);
+  request.open("POST", "/api/session/list", false);
   request.setRequestHeader("Content-Type", "application/json");
-  request.send(JSON.stringify({type:"client-request",rpcId:"desktop-session-restore",method:"session.list",payload:{}}));
+  request.send(JSON.stringify({type:"client-request",rpcId:"desktop-session-restore",method:"session/list",payload:{args:{_request:{}}}}));
   if (request.status < 200 || request.status >= 300) return;
   const response = JSON.parse(request.responseText);
   const items = response?.result?.ok === true ? response.result.value?.items : undefined;
@@ -311,25 +399,6 @@ func injectBeforeClosingBody(document, content []byte) []byte {
 		return result
 	}
 	return append(document, content...)
-}
-
-func waitForHarness(address string, command *exec.Cmd, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: time.Second}
-	for time.Now().Before(deadline) {
-		if command.ProcessState != nil && command.ProcessState.Exited() {
-			return fmt.Errorf("dsh exited before serving HTTP")
-		}
-		response, err := client.Get(address)
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode < 500 {
-				return nil
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	return fmt.Errorf("timed out waiting for %s", address)
 }
 
 func runtimeRoot() (string, error) {

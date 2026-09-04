@@ -19,14 +19,14 @@ func TestHarnessProxyNormalizesWebViewAuthority(t *testing.T) {
 		if request.Host != request.URL.Host && request.URL.Host != "" {
 			t.Fatalf("unexpected URL host: %s", request.URL.Host)
 		}
-		_, _ = io.WriteString(writer, request.Host+"\n"+request.Header.Get("Origin"))
+		_, _ = io.WriteString(writer, request.Host+"\n"+request.Header.Get("Origin")+"\n"+request.Header.Get("Cookie"))
 	}))
 	defer upstream.Close()
 	target, err := url.Parse(upstream.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyServer := httptest.NewServer(newHarnessReverseProxy(target, "linux", "ws://127.0.0.1:45678"))
+	proxyServer := httptest.NewServer(newHarnessReverseProxy(target, "linux", "ws://127.0.0.1:45678", "dsh-auth-fixture=session"))
 	defer proxyServer.Close()
 
 	request, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/api/settings.describe", nil)
@@ -44,9 +44,56 @@ func TestHarnessProxyNormalizesWebViewAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := target.Host + "\n" + target.Scheme + "://" + target.Host
+	want := target.Host + "\n" + target.Scheme + "://" + target.Host + "\ndsh-auth-fixture=session"
 	if string(body) != want {
 		t.Fatalf("normalized headers = %q, want %q", body, want)
+	}
+}
+
+func TestExchangeHarnessBrowserSession(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("token") != "fixture-token" {
+			t.Errorf("token = %q", request.URL.Query().Get("token"))
+		}
+		writer.Header().Set("Location", "/")
+		writer.Header().Set("Set-Cookie", "dsh-auth-fixture=session-value; Path=/; HttpOnly")
+		writer.WriteHeader(http.StatusSeeOther)
+	}))
+	defer upstream.Close()
+	authenticatedURL, err := url.Parse(upstream.URL + "/?token=fixture-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := exchangeHarnessBrowserSession(authenticatedURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookie != "dsh-auth-fixture=session-value" {
+		t.Fatalf("browser cookie = %q", cookie)
+	}
+}
+
+func TestHarnessReadyWriterAcceptsOnlyAuthenticatedTargetURL(t *testing.T) {
+	target, err := url.Parse("http://127.0.0.1:4567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := newHarnessReadyWriter(io.Discard, target)
+	_, _ = output.Write([]byte("noise\ndsh web: http://127.0.0.1:9999/?token=wrong\n"))
+	select {
+	case address := <-output.ready:
+		t.Fatalf("accepted wrong address: %s", address)
+	default:
+	}
+	_, _ = output.Write([]byte("dsh web: http://127.0.0.1:4567/?token=fixture"))
+	_, _ = output.Write([]byte("\n"))
+	select {
+	case address := <-output.ready:
+		if address.Query().Get("token") != "fixture" {
+			t.Fatalf("ready URL token = %q", address.Query().Get("token"))
+		}
+	default:
+		t.Fatal("authenticated ready URL was not captured")
 	}
 }
 
@@ -54,6 +101,7 @@ func TestHarnessWebSocketBridgeNormalizesWebViewHandshake(t *testing.T) {
 	type observedRequest struct {
 		host    string
 		origin  string
+		cookie  string
 		site    string
 		mode    string
 		dest    string
@@ -64,6 +112,7 @@ func TestHarnessWebSocketBridgeNormalizesWebViewHandshake(t *testing.T) {
 		observed <- observedRequest{
 			host:    request.Host,
 			origin:  request.Header.Get("Origin"),
+			cookie:  request.Header.Get("Cookie"),
 			site:    request.Header.Get("Sec-Fetch-Site"),
 			mode:    request.Header.Get("Sec-Fetch-Mode"),
 			dest:    request.Header.Get("Sec-Fetch-Dest"),
@@ -83,7 +132,7 @@ func TestHarnessWebSocketBridgeNormalizesWebViewHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge := httptest.NewServer(newHarnessWebSocketBridge(target))
+	bridge := httptest.NewServer(newHarnessWebSocketBridge(target, "dsh-auth-fixture=session"))
 	defer bridge.Close()
 	bridgeURL, err := url.Parse(bridge.URL)
 	if err != nil {
@@ -94,7 +143,7 @@ func TestHarnessWebSocketBridgeNormalizesWebViewHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	_, _ = fmt.Fprintf(connection, "GET /api/events.mux HTTP/1.1\r\nHost: wails\r\nOrigin: wails://wails\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: websocket\r\nSec-Fetch-Dest: websocket\r\n\r\n")
+	_, _ = fmt.Fprintf(connection, "GET /api/remote.mux HTTP/1.1\r\nHost: wails\r\nOrigin: wails://wails\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: websocket\r\nSec-Fetch-Dest: websocket\r\n\r\n")
 	status, err := bufio.NewReader(connection).ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +154,9 @@ func TestHarnessWebSocketBridgeNormalizesWebViewHandshake(t *testing.T) {
 	got := <-observed
 	if got.host != target.Host || got.origin != target.Scheme+"://"+target.Host {
 		t.Fatalf("bridge authority = host %q origin %q", got.host, got.origin)
+	}
+	if got.cookie != "dsh-auth-fixture=session" {
+		t.Fatalf("bridge cookie = %q", got.cookie)
 	}
 	if got.site != "same-origin" || got.mode != "websocket" || got.dest != "websocket" || !strings.EqualFold(got.upgrade, "websocket") {
 		t.Fatalf("bridge fetch metadata = %+v", got)
@@ -135,9 +187,12 @@ func TestInjectDesktopSessionRestore(t *testing.T) {
 		`id="dsh-desktop-session-restore"`,
 		`const bridgeBase = "ws://127.0.0.1:45678"`,
 		`url.protocol === "wails:"`,
+		`url.protocol === "ws:" && url.host === window.location.host`,
 		`url.pathname.startsWith("/api/")`,
 		`dsh.sessions.current`,
-		`method:"session.list"`,
+		`request.open("POST", "/api/session/list"`,
+		`method:"session/list"`,
+		`payload:{args:{_request:{}}}`,
 		`item.blank !== true`,
 		`localStorage.setItem`,
 	} {
