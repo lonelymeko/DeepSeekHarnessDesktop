@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,14 +78,29 @@ func main() {
 		CLIVersion:   stringValue(cliPackage, "version"),
 		NodeVersion:  previous.NodeVersion,
 		NodeEngines:  nestedString(rootPackage, "engines", "node"),
-		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 		Fingerprints: fingerprints,
 	}
+	if manifestsEquivalent(previous, next) {
+		_ = os.Remove("upstream/ADAPTATION_REQUIRED.md")
+		fmt.Printf("Upstream already synchronized: %s (%s), npm @deepseek-ai/dsh@%s\n", commit, *ref, next.CLIVersion)
+		return
+	}
+	next.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	encoded, err := json.MarshalIndent(next, "", "  ")
 	must(err)
 	must(os.WriteFile(manifestPath, append(encoded, '\n'), 0o644))
 	_ = os.Remove("upstream/ADAPTATION_REQUIRED.md")
 	fmt.Printf("Upstream synchronized: %s (%s), npm @deepseek-ai/dsh@%s\n", commit, *ref, next.CLIVersion)
+}
+
+func manifestsEquivalent(left, right Manifest) bool {
+	return left.Repository == right.Repository &&
+		left.Ref == right.Ref &&
+		left.Commit == right.Commit &&
+		left.CLIVersion == right.CLIVersion &&
+		left.NodeVersion == right.NodeVersion &&
+		left.NodeEngines == right.NodeEngines &&
+		maps.Equal(left.Fingerprints, right.Fingerprints)
 }
 
 func readManifest() Manifest {
