@@ -152,8 +152,9 @@ DeepSeek Harness changed files that define the desktop launch contract.
 
 1. Review the upstream diff for every file above.
 2. Update the Go launcher, runtime layout, proxy, packaging, or documentation as needed.
-3. Run go test ./..., ./scripts/prepare-runtime.sh, and a desktop smoke test.
-4. Record the reviewed update with go run ./cmd/upstream-sync --ref master --accept-breaking.
+3. Run go test ./... and make smoke, which prepares the runtime and drives this
+   shell's own handoff, session-exchange and reverse-proxy path against it.
+4. Record the reviewed update with make sync-accept.
 `, oldCommit, newCommit, time.Now().UTC().Format(time.RFC3339), "- "+strings.Join(files, "\n- "))
 }
 
