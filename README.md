@@ -16,13 +16,41 @@
 - Wails CLI v2.10.2
 - pnpm 不要求用户安装；Harness 插件管理使用上游发行包自带的运行逻辑
 
-中国大陆网络可按需设置代理：
+## 网络与代理
+
+桌面版默认跟随操作系统的代理，不需要先导出环境变量。开关在窗口右上角齿轮 →「网络」→「网络请求走系统代理」，**默认开启**。
+
+- 开启时启动器读取系统代理（macOS 用 `scutil --proxy`，Windows 读 WinINET 注册表，GNOME 桌面用 `gsettings`），把它作为 `http_proxy` / `https_proxy` / `all_proxy` / `no_proxy` 交给内置 Harness 进程；桌面自身的更新检查和 DeepSeek 用量查询走同一条链路。
+- 关闭时不读取系统代理；但你自己导出过的变量仍然生效，`export http_proxy=...` 对同名协议始终优先。
+- `127.0.0.1`、`localhost`、`::1` 永远直连，避免内置服务被绕进代理导致启动失败。
+- macOS 的 PAC（自动代理配置）不会被解析：执行 PAC 脚本等于运行第三方代码，且结果会与本机其他客户端不一致。
+- 设置保存在桌面数据目录的 `settings.json`（macOS 为 `~/Library/Application Support/DeepSeekHarnessDesktop/settings.json`），与共享 Harness 数据目录平级，不写进 Harness 自己的配置。
+- 子进程在启动时继承环境，所以开关对「Harness 自身的模型请求」在重新打开应用后完全生效；桌面内的更新与用量请求立即生效。
+
+需要时仍可显式导出：
 
 ```sh
 export https_proxy=http://127.0.0.1:7897
 export http_proxy=http://127.0.0.1:7897
 export all_proxy=socks5://127.0.0.1:7897
 ```
+
+## DeepSeek 用量与额度
+
+齿轮 →「DeepSeek 官方用量与额度」显示当前 DeepSeek 官方配置的账户情况，口径对齐官方 platform.deepseek.com/usage：
+
+- **额度**：官方公开接口 `GET /user/balance`，复用 Harness 里配置的 `DEEPSEEK_API_KEY`，展示多币种的总余额 / 充值余额 / 赠送余额与可用状态。
+- **用量**：本月 token 合计、请求次数、消费，今日 token 与消费，缓存命中 / 未命中 / 输出 token 构成，以及分模型拆分。
+
+用量接口（`platform.deepseek.com/api/v0/usage/amount`、`usage/cost`）是平台自己在用的登录态接口，不是公开 API，因此需要额外提供 `DEEPSEEK_USER_TOKEN`：登录 platform.deepseek.com 后，在浏览器控制台执行 `localStorage.getItem("userToken")`，把结果写进 `<DSH_HOME>/.credentials.yaml`：
+
+```yaml
+version: 1
+refs:
+  DEEPSEEK_USER_TOKEN: <粘贴的 userToken>
+```
+
+没有该 token 时面板只显示余额并说明原因。凭据解析顺序与 Harness 一致：进程环境变量 > `<DSH_HOME>/.credentials.yaml` > `<当前目录>/.env` > `<DSH_HOME>/.env`；API Key 只用于这一次发往 `api.deepseek.com` 的查询，不写日志。
 
 ## 开发运行
 
@@ -126,6 +154,23 @@ make sync
 make sync-accept
 ```
 
+### 适配验收
+
+`make sync-accept` 只记录指纹，不证明桌面壳仍然可用，所以接受之前先跑一次真实启动验收：
+
+```sh
+make smoke
+```
+
+它用 `runtime/current` 里的真实上游版本启动 `dsh web`，然后走桌面壳自己的代码路径做断言：
+
+- 解析 `dsh web: <url>?token=…` 交接行（`authenticatedHarnessURL`）；
+- 用 token 换 `dsh-auth-*` 会话 Cookie（`exchangeHarnessBrowserSession`）；
+- 经同源反向代理取 `/`，确认上游文档仍以 `</body>` 收尾且四段注入（会话恢复、`__DSH_TRANSPORT__`、更新面板、桌面设置面板）都落了进去；
+- 经代理调 `/api/session/list`，并额外用**分块传输**再调一次——上游从 0.1.5 起为原子上传新增了流式请求体（`POST /api/session/uploadFileBinary`），反代必须能转发没有 `Content-Length` 的请求体。
+
+没有准备运行时时该测试自动跳过；它带 `smoke` 构建标签，所以 `go test ./...` 根本不会编译它，必须显式 `make smoke` 才会跑。它用 `runtime/current/smoke-home` 作为独立的 Harness 数据目录，首次运行时从共享目录复制一份 profile 做种子（profile 的 `node_modules` 是一堆指向运行时包的软链，复制很便宜）——这样既不改动真实数据，也不用每次从网络装一遍插件。
+
 ## 运行时布局
 
 ```text
@@ -138,6 +183,8 @@ runtime/current/
 - macOS：复制到 `.app/Contents/Resources/runtime`
 - Windows/Linux：复制到可执行文件同级 `runtime`
 - 开发：使用 `DSH_DESKTOP_RUNTIME=runtime/current`
+
+`prepare-runtime` 解包 Node 发行包时会保留符号链接和文件权限位。Node 的 `bin/npm`、`bin/npx` 是指向 `lib/node_modules` 的软链；如果把它们摊平成空文件，运行时里就会留下两个「执行成功但什么都不做」的假 `npm`——这正是打包产物坏掉时最难查的那种症状。
 
 ## Python 边界
 
