@@ -161,7 +161,17 @@ func extractTarGz(source, destination string) {
 			break
 		}
 		must(err)
-		writeEntry(destination, stripRoot(header.Name), header.FileInfo().Mode(), header.FileInfo().IsDir(), reader)
+		name := stripRoot(header.Name)
+		switch header.Typeflag {
+		case tar.TypeSymlink:
+			must(writeSymlink(destination, name, header.Linkname))
+		case tar.TypeLink:
+			// A hard link names its target by archive path, so that path needs
+			// the same root stripping as an entry name does.
+			must(writeHardLink(destination, name, stripRoot(header.Linkname)))
+		default:
+			writeEntry(destination, name, header.FileInfo().Mode(), header.FileInfo().IsDir(), reader)
+		}
 	}
 }
 
@@ -170,10 +180,19 @@ func extractZip(source, destination string) {
 	must(err)
 	defer reader.Close()
 	for _, file := range reader.File {
+		if file.Mode()&os.ModeSymlink != 0 {
+			input, err := file.Open()
+			must(err)
+			target, err := io.ReadAll(io.LimitReader(input, 4096))
+			must(input.Close())
+			must(err)
+			must(writeSymlink(destination, stripRoot(file.Name), string(target)))
+			continue
+		}
 		input, err := file.Open()
 		must(err)
 		writeEntry(destination, stripRoot(file.Name), file.Mode(), file.FileInfo().IsDir(), input)
-		input.Close()
+		must(input.Close())
 	}
 }
 
@@ -200,6 +219,60 @@ func writeEntry(root, name string, mode os.FileMode, directory bool, input io.Re
 	_, err = io.Copy(output, input)
 	must(err)
 	must(output.Close())
+	// OpenFile ignores its mode for a path that already exists, so the
+	// archive's own permission bits are applied explicitly.
+	must(os.Chmod(path, mode.Perm()))
+}
+
+// writeSymlink recreates one archive symlink. The Node distribution ships
+// `bin/npm` and `bin/npx` as links into `lib/node_modules`; materialising them
+// as empty regular files leaves a shim that exits 0 without doing anything,
+// which is exactly what a broken packaged runtime looks like from the outside.
+func writeSymlink(root, name, target string) error {
+	if name == "" {
+		return nil
+	}
+	if target == "" {
+		return fmt.Errorf("archive entry %s is a symlink without a target", name)
+	}
+	path := filepath.Join(root, name)
+	if !withinRoot(root, filepath.Join(filepath.Dir(path), target)) {
+		return fmt.Errorf("archive entry %s links outside the extraction root: %s", name, target)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return os.Symlink(target, path)
+}
+
+// writeHardLink recreates one archive hard link inside the extraction root.
+func writeHardLink(root, name, target string) error {
+	if name == "" || target == "" {
+		return nil
+	}
+	source := filepath.Join(root, target)
+	if !withinRoot(root, source) {
+		return fmt.Errorf("archive entry %s links outside the extraction root: %s", name, target)
+	}
+	path := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return os.Link(source, path)
+}
+
+// withinRoot reports whether a cleaned path stays inside the extraction root,
+// so an archive can never plant a link that escapes it.
+func withinRoot(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 func must(err error) {
