@@ -31,6 +31,13 @@ type App struct {
 	bridge   *http.Server
 	updater  *releaseUpdater
 	stopOnce sync.Once
+
+	// settingsMutex guards the launch-time preferences and the proxy decision
+	// derived from them, which the settings panel can replace at runtime.
+	settingsMutex sync.RWMutex
+	settings      DesktopSettings
+	plan          proxyPlan
+	harnessHome   string
 }
 
 type harnessReadyWriter struct {
@@ -86,6 +93,127 @@ func authenticatedHarnessURL(line string, target *url.URL) *url.URL {
 
 func NewApp(proxy *HarnessProxy) *App { return &App{proxy: proxy, updater: newReleaseUpdater()} }
 
+// DesktopNetworkState is what the settings panel shows about outbound
+// proxying. Proxy URLs are redacted, because a corporate proxy or a
+// subscription provider may embed a password in them.
+type DesktopNetworkState struct {
+	UseSystemProxy  bool   `json:"useSystemProxy"`
+	Routed          bool   `json:"routed"`
+	Source          string `json:"source"`
+	HTTP            string `json:"http"`
+	HTTPS           string `json:"https"`
+	Socks           string `json:"socks"`
+	NoProxy         string `json:"noProxy"`
+	SettingsFile    string `json:"settingsFile"`
+	RestartRequired bool   `json:"restartRequired"`
+}
+
+// GetDesktopNetworkState reports the effective outbound-proxy decision.
+func (a *App) GetDesktopNetworkState() DesktopNetworkState {
+	return describeNetwork(a.desktopPlan())
+}
+
+// SetNetworkUseSystemProxy persists the preference. The in-process clients
+// follow it immediately; the child Harness process inherited its environment
+// when it launched, so its own model traffic follows the new choice only after
+// a restart, which the returned state reports.
+func (a *App) SetNetworkUseSystemProxy(enabled bool) (DesktopNetworkState, error) {
+	settings, err := setNetworkUseSystemProxy(enabled)
+	if err != nil {
+		return a.GetDesktopNetworkState(), err
+	}
+	plan := resolveProxyPlan(settings.Network.UseSystemProxy, os.Getenv, detectSystemProxy)
+	a.settingsMutex.Lock()
+	a.settings = settings
+	a.plan = plan
+	a.settingsMutex.Unlock()
+	a.updater.setProxyPlan(plan)
+	log.Printf("DeepSeek Harness Desktop outbound proxy: %s", describeProxyRoute(plan))
+	state := describeNetwork(plan)
+	state.RestartRequired = a.command != nil
+	return state, nil
+}
+
+// desktopPlan returns the current proxy decision.
+func (a *App) desktopPlan() proxyPlan {
+	a.settingsMutex.RLock()
+	defer a.settingsMutex.RUnlock()
+	return a.plan
+}
+
+// applyDesktopSettings loads the persisted preferences and resolves the
+// outbound-proxy decision they describe, before the Harness process starts.
+func (a *App) applyDesktopSettings() {
+	settings, err := loadDesktopSettings()
+	if err != nil {
+		log.Printf("DeepSeek Harness Desktop settings: %v; using defaults", err)
+		settings = defaultDesktopSettings()
+	}
+	plan := resolveProxyPlan(settings.Network.UseSystemProxy, os.Getenv, detectSystemProxy)
+	a.settingsMutex.Lock()
+	a.settings = settings
+	a.plan = plan
+	a.settingsMutex.Unlock()
+	a.updater.setProxyPlan(plan)
+	log.Printf("DeepSeek Harness Desktop outbound proxy: %s", describeProxyRoute(plan))
+}
+
+// deepSeekClient builds the HTTP client the settings panel uses, routed through
+// the same proxy decision as every other desktop request. The caller closes the
+// returned client's idle connections, so a changed preference never leaves a
+// stale pool behind.
+func (a *App) deepSeekClient() (*http.Client, func()) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = a.desktopPlan().proxyFunc()
+	return &http.Client{Transport: transport, Timeout: 20 * time.Second}, transport.CloseIdleConnections
+}
+
+// describeNetwork renders one proxy decision for the settings panel.
+func describeNetwork(plan proxyPlan) DesktopNetworkState {
+	state := DesktopNetworkState{
+		UseSystemProxy: plan.UseSystemProxy,
+		Routed:         plan.routed(),
+		Source:         plan.Source,
+		HTTP:           redactProxyURL(plan.HTTP),
+		HTTPS:          redactProxyURL(plan.HTTPS),
+		Socks:          redactProxyURL(plan.All),
+		NoProxy:        strings.Join(plan.NoProxy, ", "),
+	}
+	if path, err := desktopSettingsFile(); err == nil {
+		state.SettingsFile = path
+	}
+	return state
+}
+
+// describeProxyRoute names one decision for the log.
+func describeProxyRoute(plan proxyPlan) string {
+	if !plan.routed() {
+		return "direct (no proxy configured)"
+	}
+	source := plan.Source
+	if source == "" {
+		source = "environment"
+	}
+	return fmt.Sprintf("http=%s https=%s all=%s via %s",
+		redactProxyURL(plan.HTTP), redactProxyURL(plan.HTTPS), redactProxyURL(plan.All), source)
+}
+
+// redactProxyURL removes any credentials a proxy URL carries, so a logged or
+// displayed value never leaks a password.
+func redactProxyURL(value string) string {
+	if value == "" {
+		return ""
+	}
+	address, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	if address.User != nil {
+		address.User = url.User("***")
+	}
+	return address.String()
+}
+
 func (a *App) CheckForUpdate() (UpdateInfo, error) {
 	ctx := a.ctx
 	if ctx == nil {
@@ -108,6 +236,7 @@ func (a *App) DownloadAndOpenUpdate() (string, error) {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.applyDesktopSettings()
 	if err := a.startHarness(); err != nil {
 		log.Printf("DeepSeek Harness startup failed: %v", err)
 		a.proxy.Fail(err)
@@ -133,6 +262,7 @@ func (a *App) startHarness() error {
 	if err != nil {
 		return fmt.Errorf("prepare shared Harness data directory: %w", err)
 	}
+	a.harnessHome = harnessHome
 	log.Printf("DeepSeek Harness data directory: %s", harnessHome)
 
 	root, err := runtimeRoot()
@@ -175,7 +305,14 @@ func (a *App) startHarness() error {
 	output := newHarnessReadyWriter(io.MultiWriter(os.Stdout, a.logFile), target)
 	a.command = exec.Command(node, entry, "web", "--no-open", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
 	a.command.Dir = filepath.Join(root, "app")
-	a.command.Env = append(os.Environ(), "DSH_DESKTOP=1", "DSH_HOME="+harnessHome)
+	plan := a.desktopPlan()
+	// The child owns its own outbound traffic — model calls, plugin installs,
+	// web fetches — so the proxy decision reaches it as an environment it
+	// inherits. Inherited proxy variables are dropped first, so each name has
+	// exactly one value rather than two the child's readers could rank
+	// differently.
+	childEnv := append(withoutProxyEnvironment(os.Environ()), "DSH_DESKTOP=1", "DSH_HOME="+harnessHome)
+	a.command.Env = append(childEnv, plan.environment()...)
 	a.command.Stdout = output
 	a.command.Stderr = io.MultiWriter(os.Stderr, a.logFile)
 	if err := a.command.Start(); err != nil {
@@ -343,6 +480,7 @@ func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase, brow
 		if platform == "darwin" || platform == "windows" {
 			body = injectDesktopChrome(body, platform)
 		}
+		body = injectDesktopSettings(body, platform)
 		response.Body = io.NopCloser(bytes.NewReader(body))
 		response.ContentLength = int64(len(body))
 		response.Header.Set("Content-Length", strconv.Itoa(len(body)))
@@ -505,7 +643,10 @@ setInterval(checkForUpdate, 6 * 60 * 60 * 1000);
 
 func injectDesktopChrome(document []byte, platform string) []byte {
 	controls := ""
-	dragRight := "8px"
+	// macOS reserves the right corner for the desktop settings gear, which is
+	// injected into this title bar; Windows already stops the drag region
+	// before its own window controls.
+	dragRight := "48px"
 	chromeHeight := "44px"
 	if platform == "windows" {
 		dragRight = "116px"

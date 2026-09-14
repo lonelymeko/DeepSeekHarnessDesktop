@@ -102,6 +102,16 @@ func newReleaseUpdater() *releaseUpdater {
 	}
 }
 
+// setProxyPlan routes the updater's requests through the decided proxy. Go's
+// default transport already honours the proxy environment, but it resolves that
+// environment once per process, so a preference changed at runtime — or a proxy
+// only the operating system knows about — needs an explicit hook.
+func (u *releaseUpdater) setProxyPlan(plan proxyPlan) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = plan.proxyFunc()
+	u.client.Transport = transport
+}
+
 func (u *releaseUpdater) check(ctx context.Context) (UpdateInfo, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
