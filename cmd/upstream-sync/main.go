@@ -17,6 +17,17 @@ import (
 
 const manifestPath = "upstream/manifest.json"
 
+// Exit codes are a contract with .github/workflows/upstream-sync.yml. Two means
+// "the upstream launch contract changed; adapt before syncing" — a verdict, not
+// a crash. Every unexpected failure must therefore leave with a different code.
+// Go's default panic status is also 2, so an unhandled error used to masquerade
+// as that verdict and turn a broken check into a bogus "adaptation required".
+const (
+	exitOK     = 0
+	exitFailed = 1
+	exitAdapt  = 2
+)
+
 var criticalFiles = []string{
 	"package.json",
 	"apps/cli/package.json",
@@ -45,7 +56,7 @@ func main() {
 	temporary, err := os.MkdirTemp("", "dsh-upstream-")
 	must(err)
 	defer os.RemoveAll(temporary)
-	run("git", "clone", "--depth", "1", "--branch", *ref, previous.Repository, temporary)
+	cloneUpstream(previous.Repository, *ref, temporary)
 
 	commit := output(temporary, "git", "rev-parse", "HEAD")
 	rootPackage := readPackage(filepath.Join(temporary, "package.json"))
@@ -68,7 +79,7 @@ func main() {
 		must(os.WriteFile("upstream/ADAPTATION_REQUIRED.md", []byte(report), 0o644))
 		fmt.Fprintln(os.Stderr, "\n⚠️  检测到可能破坏桌面适配的上游更新，已停止同步。")
 		fmt.Fprintln(os.Stderr, "请查看 upstream/ADAPTATION_REQUIRED.md，完成适配后使用 --accept-breaking 继续。")
-		os.Exit(2)
+		os.Exit(exitAdapt)
 	}
 
 	next := Manifest{
@@ -158,10 +169,25 @@ DeepSeek Harness changed files that define the desktop launch contract.
 `, oldCommit, newCommit, time.Now().UTC().Format(time.RFC3339), "- "+strings.Join(files, "\n- "))
 }
 
-func run(name string, args ...string) {
-	command := exec.Command(name, args...)
-	command.Stdout, command.Stderr = os.Stdout, os.Stderr
-	must(command.Run())
+// cloneUpstream shallow-clones the upstream repository, retrying a few times.
+// The nightly check clones a large public repository over the runner's network;
+// one transient failure must not abort the whole check (and must never look like
+// the adaptation verdict).
+func cloneUpstream(repository, ref, destination string) {
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		_ = os.RemoveAll(destination)
+		command := exec.Command("git", "clone", "--depth", "1", "--branch", ref, repository, destination)
+		command.Stdout, command.Stderr = os.Stdout, os.Stderr
+		if err = command.Run(); err == nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "upstream-sync: git clone attempt %d/3 failed: %v\n", attempt, err)
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 3 * time.Second)
+		}
+	}
+	must(err)
 }
 
 func output(dir, name string, args ...string) string {
@@ -172,8 +198,11 @@ func output(dir, name string, args ...string) string {
 	return strings.TrimSpace(string(content))
 }
 
+// must fails with the crash code rather than panicking: a panic would exit 2,
+// which the workflow reads as the adaptation verdict.
 func must(err error) {
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, "upstream-sync:", err)
+		os.Exit(exitFailed)
 	}
 }

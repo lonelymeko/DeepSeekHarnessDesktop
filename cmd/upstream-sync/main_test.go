@@ -27,6 +27,18 @@ func TestBreakingReportNamesEveryFileAndTheGates(t *testing.T) {
 	}
 }
 
+func TestExitCodesKeepTheWorkflowContract(t *testing.T) {
+	// .github/workflows/upstream-sync.yml reads 2 as the adaptation verdict and
+	// any other non-zero as a crash. Go's default panic status is also 2, so the
+	// crash path must not use it, or a broken check is misreported as the verdict.
+	if exitAdapt != 2 {
+		t.Fatalf("verdict exit code is %d, but the workflow expects 2", exitAdapt)
+	}
+	if exitFailed == exitAdapt || exitFailed == exitOK {
+		t.Fatalf("crash exit code %d collides with another exit code", exitFailed)
+	}
+}
+
 func TestManifestsEquivalentIgnoresUpdateTimestamp(t *testing.T) {
 	left := Manifest{
 		Repository:   "https://example.test/upstream.git",
