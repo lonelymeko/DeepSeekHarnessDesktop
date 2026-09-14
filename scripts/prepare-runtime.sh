@@ -8,3 +8,4 @@ TARGET_OS="${1:-$(go env GOOS)}"
 TARGET_ARCH="${2:-$(go env GOARCH)}"
 
 go run ./cmd/prepare-runtime --os "$TARGET_OS" --arch "$TARGET_ARCH" --output runtime/current
+go run ./cmd/patch-runtime --runtime runtime/current
