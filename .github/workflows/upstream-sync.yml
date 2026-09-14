@@ -15,11 +15,62 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
-      - run: ./scripts/update-upstream.sh --ref master
+
+      # The synchroniser exits 2 — not 1 — when upstream changed a file that
+      # defines the desktop launch contract. That is a verdict, not a crash, so
+      # its exit code is captured rather than failing the step outright: the
+      # verdict decides which of the outcomes below applies. Anything other than
+      # 0 or 2 is a genuine failure and stops here with its own code.
+      - name: Sync upstream metadata
+        id: sync
+        run: |
+          set +e
+          ./scripts/update-upstream.sh --ref master
+          code=$?
+          set -e
+          echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
+            echo "::error title=Upstream check crashed::the synchroniser exited $code, which is neither success nor the adaptation verdict"
+            exit "$code"
+          fi
+
+      # The verdict used to die with the failed job's workspace, leaving the
+      # runner log — which needs admin rights to read — as the only place the
+      # report existed. Writing it to the job summary puts the whole thing on
+      # the run page, which is where somebody noticing a red nightly build lands.
+      - name: Report the adaptation verdict
+        if: steps.sync.outputs.exit-code == '2'
+        run: |
+          if [ -f upstream/ADAPTATION_REQUIRED.md ]; then
+            cat upstream/ADAPTATION_REQUIRED.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=Missing adaptation report::the synchroniser returned the adaptation verdict without writing upstream/ADAPTATION_REQUIRED.md"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.sync.outputs.exit-code == '2'
+        with:
+          name: upstream-adaptation-required
+          path: upstream/ADAPTATION_REQUIRED.md
+          if-no-files-found: warn
+
+      # Deliberately last and deliberately red: an upstream contract change is an
+      # action item, not a silent pass. The annotation is what the run page shows
+      # without opening a single log.
+      - name: Fail with the adaptation verdict
+        if: steps.sync.outputs.exit-code == '2'
+        run: |
+          echo "::error title=Upstream adaptation required::read this run's summary, follow upstream/ADAPTATION_REQUIRED.md, run make smoke, then record the decision with make sync-accept"
+          exit 1
+
       - uses: peter-evans/create-pull-request@v7
-        if: success()
+        if: steps.sync.outputs.exit-code == '0'
         with:
           branch: bot/update-deepseek-harness
           title: 'chore: update DeepSeek Harness upstream'
           commit-message: 'chore: update DeepSeek Harness upstream'
-          body: 'Automated non-breaking upstream metadata update. Runtime packages rebuild from the pinned npm version.'
+          body: |
+            Automated non-breaking upstream metadata update. Runtime packages rebuild from the pinned npm version.
+
+            The contract check found no change to the desktop launch contract. The
+            adaptation gate is `make smoke`, run it before publishing a release built on this update.
