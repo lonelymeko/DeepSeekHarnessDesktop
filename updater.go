@@ -103,6 +103,10 @@ func newReleaseUpdater() *releaseUpdater {
 	}
 }
 
+func (u *releaseUpdater) installDownloaded(downloaded string) error {
+	return applyDownloadedUpdate(downloaded)
+}
+
 // setProxyPlan routes the updater's requests through the decided proxy. Go's
 // default transport already honours the proxy environment, but it resolves that
 // environment once per process, so a preference changed at runtime — or a proxy

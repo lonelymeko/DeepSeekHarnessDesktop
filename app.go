@@ -237,6 +237,44 @@ func (a *App) DownloadAndOpenUpdate() (string, error) {
 	})
 }
 
+// InstallUpdate downloads the release and replaces this installation in place,
+// then quits so the detached helper can swap the files and relaunch.
+//
+// This is the path the update banner uses. The user answers one prompt and the
+// application comes back updated; nothing is dragged into Applications and no
+// installer wizard is shown.
+func (a *App) InstallUpdate() (UpdateInstallResult, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	downloaded, err := a.DownloadAndOpenUpdate()
+	if err != nil {
+		return UpdateInstallResult{}, err
+	}
+	if err := a.updater.installDownloaded(downloaded); err != nil {
+		return UpdateInstallResult{}, err
+	}
+	// Quit deliberately: the helper waits for this process to disappear before
+	// it touches the bundle, and relaunches the new version itself.
+	go func() {
+		time.Sleep(1200 * time.Millisecond)
+		if a.ctx != nil {
+			wailsruntime.Quit(a.ctx)
+		}
+	}()
+	return UpdateInstallResult{Installed: true, Restarting: true, Path: downloaded}, nil
+}
+
+// UpdateInstallResult reports what the install did, so the banner can tell the
+// user the application is about to restart rather than leaving it guessing.
+type UpdateInstallResult struct {
+	Installed   bool   `json:"installed"`
+	Restarting  bool   `json:"restarting"`
+	Path        string `json:"path"`
+	Unsupported bool   `json:"unsupported"`
+}
+
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.applyDesktopSettings()
@@ -559,6 +597,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 async function updaterAPI() {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const candidate = window.go && window.go.main && window.go.main.App;
+    if (candidate && candidate.CheckForUpdate && candidate.InstallUpdate) return candidate;
     if (candidate && candidate.CheckForUpdate && candidate.DownloadAndOpenUpdate) return candidate;
     await wait(250);
   }
@@ -610,20 +649,15 @@ install.addEventListener("click", async () => {
     });
   }
   try {
-    await api.DownloadAndOpenUpdate();
+    const result = await api.InstallUpdate();
     progressBar.style.width = "100%";
     install.hidden = true;
     later.disabled = false;
     later.textContent = "关闭";
     notes.disabled = false;
-    if (String(update.platform).startsWith("windows/")) {
-      status.textContent = "安装器已打开，应用即将退出。";
-      setTimeout(() => window.runtime && window.runtime.Quit && window.runtime.Quit(), 1200);
-    } else if (String(update.platform).startsWith("darwin/")) {
-      status.textContent = "磁盘映像已打开，可安装新版本。";
-    } else {
-      status.textContent = "更新包已下载并打开。";
-    }
+    status.textContent = result && result.installed
+      ? "已下载并校验，正在重启以完成安装…"
+      : "更新包已下载。";
   } catch (error) {
     status.textContent = "更新失败：" + String(error && error.message ? error.message : error);
     install.disabled = false;
