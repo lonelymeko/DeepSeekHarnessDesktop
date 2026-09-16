@@ -11,3 +11,7 @@ dist-packages
 
 # Wails regenerates the frontend bindings on every build.
 frontend/wailsjs
+# Local scratch homes and unpacked runtimes from debugging sessions.
+SH-TMP
+runtime/cache
+runtime/smoke-home

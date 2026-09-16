@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -398,4 +400,87 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// childPathPrefixes returns the runtime-relative directories that must lead
+// the child's PATH. The desktop app launched from Finder or the Dock inherits
+// launchd's minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin), which contains none
+// of the tooling the harness child relies on: plugins such as the plugin shop
+// spawn a `dsh` CLI, `dsh plugin` spawns `pnpm`, and `pnpm`'s shebang resolves
+// `node` through PATH. All three binaries ship inside the bundled runtime
+// (node/npm/npx under root/node/bin, dsh under the app's node_modules/.bin),
+// so prefixing those directories repairs the whole chain regardless of what
+// the user's login shell would have provided.
+func childPathPrefixes(root string) []string {
+	prefixes := []string{}
+	if runtime.GOOS == "windows" {
+		// Windows keeps the node distribution directly under root/node.
+		prefixes = append(prefixes, filepath.Join(root, "node"))
+		return prefixes
+	}
+	prefixes = append(prefixes,
+		filepath.Join(root, "node", "bin"),
+		filepath.Join(root, "app", "node_modules", ".bin"),
+	)
+	return prefixes
+}
+
+// commonUnixToolBins lists the conventional macOS and Linux tool locations a
+// login shell would normally have. They are appended (never prepended) after
+// the runtime prefixes so a user-managed pnpm or similar tool stays reachable
+// even though launchd stripped it from the inherited PATH.
+var commonUnixToolBins = []string{"/opt/homebrew/bin", "/usr/local/bin"}
+
+// augmentChildPath returns env with PATH rebuilt so the bundled runtime's
+// node and dsh binaries lead, followed by whatever PATH the app inherited,
+// followed by the conventional Unix tool directories. Keeping the inherited
+// value preserves anything a terminal-launched app would legitimately pass
+// down; appending the conventional directories restores the toolchain a
+// Finder/Dock launch lost.
+func augmentChildPath(env []string, root string) []string {
+	prefixes := childPathPrefixes(root)
+	var inherited string
+	for _, entry := range env {
+		if name, value, found := strings.Cut(entry, "="); found && name == "PATH" {
+			inherited = value
+		}
+	}
+	merged := make([]string, 0, len(prefixes)+len(commonUnixToolBins)+1)
+	seen := make(map[string]bool)
+	add := func(dir string) {
+		if dir == "" || seen[dir] {
+			return
+		}
+		seen[dir] = true
+		merged = append(merged, dir)
+	}
+	for _, dir := range prefixes {
+		add(dir)
+	}
+	if inherited != "" {
+		for _, dir := range filepath.SplitList(inherited) {
+			add(dir)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		for _, dir := range commonUnixToolBins {
+			add(dir)
+		}
+	}
+	rebuilt := "PATH=" + strings.Join(merged, string(filepath.ListSeparator))
+	augmented := make([]string, 0, len(env)+1)
+	wrote := false
+	for _, entry := range env {
+		name, _, found := strings.Cut(entry, "=")
+		if found && name == "PATH" {
+			augmented = append(augmented, rebuilt)
+			wrote = true
+			continue
+		}
+		augmented = append(augmented, entry)
+	}
+	if !wrote {
+		augmented = append(augmented, rebuilt)
+	}
+	return augmented
 }

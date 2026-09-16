@@ -352,7 +352,15 @@ func (a *App) startHarness() error {
 	// inherits. Inherited proxy variables are dropped first, so each name has
 	// exactly one value rather than two the child's readers could rank
 	// differently.
-	childEnv := append(withoutProxyEnvironment(os.Environ()), "DSH_DESKTOP=1", "DSH_HOME="+harnessHome)
+	//
+	// PATH is rebuilt before the plan folds in: the child leads with the
+	// bundled runtime's node and dsh, keeps whatever the app inherited, and
+	// regains the conventional tool directories a Finder or Dock launch loses
+	// to launchd's minimal PATH. Without this, plugins that spawn `dsh` (the
+	// plugin shop) or `pnpm` (dsh plugin) fail with ENOENT inside the
+	// packaged app while working from a terminal.
+	childEnv := augmentChildPath(withoutProxyEnvironment(os.Environ()), root)
+	childEnv = append(childEnv, "DSH_DESKTOP=1", "DSH_HOME="+harnessHome)
 	a.command.Env = append(childEnv, plan.environment()...)
 	a.command.Stdout = output
 	a.command.Stderr = io.MultiWriter(os.Stderr, a.logFile)
