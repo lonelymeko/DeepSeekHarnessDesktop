@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -108,7 +109,12 @@ func newReleaseUpdater() *releaseUpdater {
 // only the operating system knows about — needs an explicit hook.
 func (u *releaseUpdater) setProxyPlan(plan proxyPlan) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = plan.proxyFunc()
+	if err := plan.applyToTransport(transport); err != nil {
+		// An unusable proxy must not disable updating altogether: the failure is
+		// reported and the request goes direct, which is what the Harness itself
+		// does with a proxy URL it cannot use.
+		log.Printf("DeepSeek Harness Desktop update proxy: %v; updating directly", err)
+	}
 	u.client.Transport = transport
 }
 

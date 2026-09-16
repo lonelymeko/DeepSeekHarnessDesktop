@@ -8,3 +8,6 @@ runtime/cache
 dist-packages
 .cache
 .DS_Store
+
+# Wails regenerates the frontend bindings on every build.
+frontend/wailsjs

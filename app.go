@@ -164,7 +164,10 @@ func (a *App) applyDesktopSettings() {
 // stale pool behind.
 func (a *App) deepSeekClient() (*http.Client, func()) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = a.desktopPlan().proxyFunc()
+	plan := a.desktopPlan()
+	if err := plan.applyToTransport(transport); err != nil {
+		log.Printf("DeepSeek Harness Desktop usage proxy: %v; reading directly", err)
+	}
 	return &http.Client{Transport: transport, Timeout: 20 * time.Second}, transport.CloseIdleConnections
 }
 
@@ -176,7 +179,7 @@ func describeNetwork(plan proxyPlan) DesktopNetworkState {
 		Source:         plan.Source,
 		HTTP:           redactProxyURL(plan.HTTP),
 		HTTPS:          redactProxyURL(plan.HTTPS),
-		Socks:          redactProxyURL(plan.All),
+		Socks:          redactProxyURL(firstNonEmpty(plan.SOCKS, socksFrom(plan.All))),
 		NoProxy:        strings.Join(plan.NoProxy, ", "),
 	}
 	if path, err := desktopSettingsFile(); err == nil {

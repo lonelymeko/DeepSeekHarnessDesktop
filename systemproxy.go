@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/proxy"
 )
 
 // systemProxy is what the operating system reports about outbound proxying.
@@ -56,6 +61,10 @@ type proxyPlan struct {
 	HTTP  string
 	HTTPS string
 	All   string
+	// SOCKS is a socks5:// endpoint, kept separate from the HTTP family: the
+	// two are not interchangeable, and only the children that can actually
+	// speak SOCKS should be handed one.
+	SOCKS string
 	// NoProxy is the merged bypass list.
 	NoProxy []string
 	// Source names where the proxies came from, for the settings panel.
@@ -91,14 +100,23 @@ func resolveProxyPlan(useSystemProxy bool, lookup func(string) string, detect fu
 		}
 	}
 	bypass := splitProxyList(firstNonEmpty(lookup("no_proxy"), lookup("NO_PROXY")))
+	plan.SOCKS = firstNonEmpty(lookup("socks_proxy"), lookup("SOCKS_PROXY"), lookup("all_proxy"), lookup("ALL_PROXY"))
 	if useSystemProxy {
 		detected := detect()
 		plan.Source = detected.Source
+		// A SOCKS endpoint is kept apart from the HTTP family on purpose. It is
+		// not interchangeable with one: an http:// or https:// variable naming a
+		// SOCKS URL is rejected outright by the Harness, and Go's transport can
+		// only reach the scheme through a dedicated dialer. Conflating the two
+		// produced a proxy setting that silently routed nothing.
 		if plan.HTTP == "" {
-			plan.HTTP = firstNonEmpty(detected.HTTP, detected.SOCKS)
+			plan.HTTP = detected.HTTP
 		}
 		if plan.HTTPS == "" {
-			plan.HTTPS = firstNonEmpty(detected.HTTPS, detected.HTTP, detected.SOCKS)
+			plan.HTTPS = firstNonEmpty(detected.HTTPS, detected.HTTP)
+		}
+		if plan.SOCKS == "" {
+			plan.SOCKS = detected.SOCKS
 		}
 		if plan.All == "" {
 			plan.All = firstNonEmpty(detected.SOCKS, detected.HTTPS, detected.HTTP)
@@ -111,7 +129,7 @@ func resolveProxyPlan(useSystemProxy bool, lookup func(string) string, detect fu
 
 // routed reports whether any outbound request would use a proxy.
 func (p proxyPlan) routed() bool {
-	return p.HTTP != "" || p.HTTPS != "" || p.All != ""
+	return p.HTTP != "" || p.HTTPS != "" || p.All != "" || p.SOCKS != ""
 }
 
 // environment is the variable set the child Harness process must inherit for
@@ -143,9 +161,37 @@ func (p proxyPlan) environment() []string {
 	return entries
 }
 
+// applyToTransport installs the plan's routing on an HTTP transport: the HTTP
+// family through the Proxy hook, and a SOCKS endpoint through the dialer, since
+// `Transport.Proxy` cannot express the latter.
+//
+// Installing only the dialer when SOCKS is the sole proxy is what makes a
+// SOCKS-only machine work — without it every request would go direct and the
+// setting would look honoured while routing nothing.
+func (p proxyPlan) applyToTransport(transport *http.Transport) error {
+	transport.Proxy = p.proxyFunc()
+	dialer, err := p.socksDialer()
+	if err != nil {
+		return err
+	}
+	if dialer == nil {
+		return nil
+	}
+	contextDialer, ok := dialer.(proxy.ContextDialer)
+	if !ok {
+		return fmt.Errorf("SOCKS dialer does not support context cancellation")
+	}
+	transport.DialContext = contextDialer.DialContext
+	return nil
+}
+
 // proxyFunc routes the desktop updater's requests the same way the child
 // process routes its own. Resolving per request keeps a bypass list and a
 // scheme split working, which a single static proxy URL could not express.
+//
+// SOCKS is deliberately absent here: `Transport.Proxy` speaks HTTP CONNECT
+// only, so a socks5:// URL returned from this hook would be handed to the HTTP
+// proxy code and fail. {@link socksDialer} covers that scheme instead.
 func (p proxyPlan) proxyFunc() func(*http.Request) (*url.URL, error) {
 	return func(request *http.Request) (*url.URL, error) {
 		if bypassesProxy(request.URL.Hostname(), p.NoProxy) {
@@ -158,11 +204,91 @@ func (p proxyPlan) proxyFunc() func(*http.Request) (*url.URL, error) {
 		if raw == "" {
 			raw = p.All
 		}
-		if raw == "" {
+		if raw == "" || isSOCKSProxyURL(raw) {
 			return nil, nil
 		}
 		return url.Parse(raw)
 	}
+}
+
+// isSOCKSProxyURL reports whether a proxy URL names a SOCKS endpoint, which the
+// HTTP transport cannot use and a dedicated dialer must.
+func isSOCKSProxyURL(value string) bool {
+	address, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(address.Scheme)
+	return scheme == "socks" || scheme == "socks5" || scheme == "socks5h"
+}
+
+// socksDialer builds a dialer that reaches every host through the plan's SOCKS
+// endpoint, or returns nil when the plan configures none.
+//
+// The returned dialer bypasses the same hosts the bypass list names, so a
+// SOCKS-only plan does not start tunnelling the loopback traffic the Harness
+// depends on.
+func (p proxyPlan) socksDialer() (proxy.Dialer, error) {
+	raw := firstNonEmpty(p.SOCKS, socksFrom(p.All))
+	if raw == "" {
+		return nil, nil
+	}
+	address, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse SOCKS proxy %q: %w", raw, err)
+	}
+	host := address.Host
+	if host == "" {
+		return nil, fmt.Errorf("SOCKS proxy %q names no host", raw)
+	}
+	var auth *proxy.Auth
+	if address.User != nil {
+		password, _ := address.User.Password()
+		auth = &proxy.Auth{User: address.User.Username(), Password: password}
+	}
+	dialer, err := proxy.SOCKS5("tcp", host, auth, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("build SOCKS dialer for %q: %w", raw, err)
+	}
+	return &bypassingDialer{delegate: dialer, bypass: p.NoProxy}, nil
+}
+
+// socksFrom returns a SOCKS URL unchanged and any other URL as empty, so a plan
+// whose ALL_PROXY holds an http:// endpoint is not mistaken for SOCKS.
+func socksFrom(value string) string {
+	if isSOCKSProxyURL(value) {
+		return value
+	}
+	return ""
+}
+
+// bypassingDialer sends bypassed hosts straight out and everything else through
+// the wrapped dialer.
+type bypassingDialer struct {
+	delegate proxy.Dialer
+	bypass   []string
+}
+
+// DialContext implements proxy.ContextDialer so a transport can honour request
+// cancellation and its own dial timeout.
+func (d *bypassingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	if bypassesProxy(host, d.bypass) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, address)
+	}
+	if contextDialer, ok := d.delegate.(proxy.ContextDialer); ok {
+		return contextDialer.DialContext(ctx, network, address)
+	}
+	return d.delegate.Dial(network, address)
+}
+
+// Dial implements proxy.Dialer.
+func (d *bypassingDialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
 }
 
 // bypassesProxy reports whether a host matches any bypass entry. Entries are
