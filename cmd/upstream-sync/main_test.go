@@ -39,6 +39,66 @@ func TestExitCodesKeepTheWorkflowContract(t *testing.T) {
 	}
 }
 
+func TestPackageContractProjectionIgnoresRoutineChurn(t *testing.T) {
+	base := `{
+		"name": "@deepseek-ai/dsh-root",
+		"version": "0.1.5-rc.1",
+		"engines": {"node": ">=24"},
+		"scripts": {"build": "tsdown"},
+		"dependencies": {"@deepseek-ai/dsh-web-app": "workspace:^"},
+		"devDependencies": {"vitest": "^3.0.0"},
+		"publishConfig": {"access": "public"}
+	}`
+	before, err := packageContractProjection([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A version bump, a new script and a moved dependency range are exactly the
+	// upstream churn that must not demand a manual adaptation review.
+	churned := `{
+		"name": "@deepseek-ai/dsh-root",
+		"version": "0.1.5-rc.2",
+		"engines": {"node": ">=24"},
+		"scripts": {"build": "tsdown", "lint": "oxlint"},
+		"dependencies": {"@deepseek-ai/dsh-web-app": "workspace:^0.1.5"},
+		"devDependencies": {"vitest": "^3.1.0"},
+		"publishConfig": {"access": "public"}
+	}`
+	after, err := packageContractProjection([]byte(churned))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("routine churn changed the contract projection:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestPackageContractProjectionFlagsContractChanges(t *testing.T) {
+	base := `{"name":"x","version":"1.0.0","engines":{"node":">=24"},"dependencies":{"a":"1","b":"2"}}`
+	project := func(src string) string {
+		out, err := packageContractProjection([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	reference := project(base)
+	cases := map[string]string{
+		"node engine change":  `{"name":"x","version":"1.0.0","engines":{"node":">=26"},"dependencies":{"a":"1","b":"2"}}`,
+		"dependency added":    `{"name":"x","version":"1.0.0","engines":{"node":">=24"},"dependencies":{"a":"1","b":"2","c":"3"}}`,
+		"dependency dropped":  `{"name":"x","version":"1.0.0","engines":{"node":">=24"},"dependencies":{"a":"1"}}`,
+		"name change":         `{"name":"y","version":"1.0.0","engines":{"node":">=24"},"dependencies":{"a":"1","b":"2"}}`,
+		"entry point changed": `{"name":"x","version":"1.0.0","bin":{"dsh":"other.js"},"engines":{"node":">=24"},"dependencies":{"a":"1","b":"2"}}`,
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			if project(src) == reference {
+				t.Fatal("a contract change was projected away")
+			}
+		})
+	}
+}
+
 func TestManifestsEquivalentIgnoresUpdateTimestamp(t *testing.T) {
 	left := Manifest{
 		Repository:   "https://example.test/upstream.git",

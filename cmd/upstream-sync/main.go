@@ -28,12 +28,56 @@ const (
 	exitAdapt  = 2
 )
 
-var criticalFiles = []string{
-	"package.json",
-	"apps/cli/package.json",
-	"apps/cli/src/args.ts",
-	"packages/bundle/web-app/src/startup.ts",
-	"packages/bundle/web-app/cordis.patch.yml",
+// criticalFile names a launch-contract file and, optionally, projects its
+// content onto the contract-relevant fields. Without a projection the whole
+// file is hashed. The JSON package manifests use packageContractProjection so
+// routine upstream churn — a version bump, a new script, a dependency range —
+// does not read as a launch-contract change, while engines, entrypoints, the
+// dependency set and every non-JSON contract file still do.
+type criticalFile struct {
+	path    string
+	project func([]byte) ([]byte, error)
+}
+
+var criticalFiles = []criticalFile{
+	{"package.json", packageContractProjection},
+	{"apps/cli/package.json", packageContractProjection},
+	{"apps/cli/src/args.ts", nil},
+	{"packages/bundle/web-app/src/startup.ts", nil},
+	{"packages/bundle/web-app/cordis.patch.yml", nil},
+}
+
+// benignPackageFields never reach the desktop launch contract, so upstream may
+// change them without a manual adaptation review.
+var benignPackageFields = []string{
+	"version", "scripts", "publishConfig", "devDependencies",
+	"packageManager", "license", "description", "author",
+	"repository", "bugs", "homepage", "keywords", "files", "comments",
+}
+
+// packageContractProjection keeps only the package.json fields the desktop
+// shell actually depends on. Dependency names are kept (adding or dropping one
+// is structural) but their ranges are dropped, because every routine bump would
+// otherwise force a review.
+func packageContractProjection(content []byte) ([]byte, error) {
+	var manifest map[string]any
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		return nil, err
+	}
+	for _, field := range benignPackageFields {
+		delete(manifest, field)
+	}
+	for _, field := range []string{"dependencies", "peerDependencies", "optionalDependencies"} {
+		dependencies, ok := manifest[field].(map[string]any)
+		if !ok {
+			continue
+		}
+		for name := range dependencies {
+			dependencies[name] = ""
+		}
+	}
+	// json.Marshal orders object keys, so the projection is canonical.
+	return json.Marshal(manifest)
 }
 
 type Manifest struct {
@@ -63,13 +107,18 @@ func main() {
 	cliPackage := readPackage(filepath.Join(temporary, "apps", "cli", "package.json"))
 	fingerprints := map[string]string{}
 	var changed []string
-	for _, name := range criticalFiles {
-		content, readErr := os.ReadFile(filepath.Join(temporary, filepath.FromSlash(name)))
+	for _, file := range criticalFiles {
+		content, readErr := os.ReadFile(filepath.Join(temporary, filepath.FromSlash(file.path)))
 		must(readErr)
-		digest := sha256.Sum256(content)
-		fingerprints[name] = hex.EncodeToString(digest[:])
-		if old := previous.Fingerprints[name]; old != "" && old != fingerprints[name] {
-			changed = append(changed, name)
+		projected := content
+		if file.project != nil {
+			projected, readErr = file.project(content)
+			must(readErr)
+		}
+		digest := sha256.Sum256(projected)
+		fingerprints[file.path] = hex.EncodeToString(digest[:])
+		if old := previous.Fingerprints[file.path]; old != "" && old != fingerprints[file.path] {
+			changed = append(changed, file.path)
 		}
 	}
 	sort.Strings(changed)
