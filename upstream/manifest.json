@@ -1,16 +1,16 @@
 {
   "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
   "ref": "master",
-  "commit": "c291e7961a515f6d7af9304e7fd1d257929aef26",
-  "cliVersion": "0.1.5-rc.2",
+  "commit": "0d1f50007f9bca3f52b06e1c3074fa14d5fb0720",
+  "cliVersion": "0.1.6-alpha.1",
   "nodeVersion": "26.7.0",
   "nodeEngines": "^22.19.0 || \u003e=24.0.0",
-  "updatedAt": "2026-09-15T03:46:12Z",
+  "updatedAt": "2026-09-16T04:02:14Z",
   "fingerprints": {
-    "apps/cli/package.json": "ce1ebfe1af3d9b1ed3d666129c713708afccc16a96d5198fe694541410c314b7",
+    "apps/cli/package.json": "e7f9214841c5e587eb0deec05229904f628890f0d9aac8f88d3d4af598a91274",
     "apps/cli/src/args.ts": "bb51e01fddf9a6e1563053c430faa92fe89e1e4e2a47b0fb96af1d82887c4173",
     "package.json": "1cfa5282e03d0348f8e93ee991570f95a5ef09b5c13d0516e51e70fab58aea7c",
-    "packages/bundle/web-app/cordis.patch.yml": "1c0209b817d05d25ed9857c8d9611fa631301f1b9593e871f23595e83b17261d",
+    "packages/bundle/web-app/cordis.patch.yml": "66d91275b050a4f2b29f4584b58b128a49009d9c95ca62240c098fa57c5ee2e8",
     "packages/bundle/web-app/src/startup.ts": "796b31607564f7662c6328457f900ba0f3d1b8fb06eb1d99b0a09ebe0e869d69"
   }
 }
