@@ -138,6 +138,12 @@ func (p proxyPlan) routed() bool {
 // accepts either, and one shared value avoids a case-precedence surprise. A
 // plan with nothing to route and nothing inherited writes nothing, so turning
 // the setting off truly leaves the child's environment alone.
+//
+// ALL_PROXY carries the socks5:// URL even though the Harness's own policy
+// rejects SOCKS and connects directly. Publishing it is still right: the value
+// is what the user configured, every other tool the child spawns reads the same
+// variable, and dropping it would hide the setting from them. The Harness's
+// rejection is reported by the Harness itself, not swallowed here.
 func (p proxyPlan) environment() []string {
 	if !p.routed() && !p.Inherited {
 		return nil
