@@ -24,6 +24,23 @@ func TestUpdateHelperQuotesPaths(t *testing.T) {
 	}
 }
 
+func TestDarwinHelperDoesNotDoubleQuoteTheBundle(t *testing.T) {
+	script := darwinUpdateHelper(
+		"/tmp/DeepSeekHarnessDesktop-0.1.7-darwin-arm64.dmg",
+		"/Applications/DeepSeekHarnessDesktop.app",
+		"/Applications/DeepSeekHarnessDesktop.app/Contents/MacOS/DeepSeekHarnessDesktop",
+	)
+	if strings.Contains(script, `"'/Applications/DeepSeekHarnessDesktop.app'"`) {
+		t.Fatal("the helper nested quotes around the bundle path, so mv would look for a file whose name includes the quotes")
+	}
+	if !strings.Contains(script, `mv '/Applications/DeepSeekHarnessDesktop.app' "$previous"`) {
+		t.Fatalf("expected a single-quoted mv of the real bundle, got:\n%s", script)
+	}
+	if strings.Contains(script, `open "'/Applications/DeepSeekHarnessDesktop.app'"`) {
+		t.Fatal("open must not receive a nested-quoted path")
+	}
+}
+
 // A binary outside a bundle is not something the helper can replace, and on the
 // one platform where that matters it must say so rather than guess a target.
 func TestUpdateTargetRejectsNonBundle(t *testing.T) {

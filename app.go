@@ -248,7 +248,11 @@ func (a *App) InstallUpdate() (UpdateInstallResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	downloaded, err := a.DownloadAndOpenUpdate()
+	downloaded, err := a.updater.downloadVerified(ctx, func(progress UpdateDownloadProgress) {
+		if a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "desktop:update-progress", progress)
+		}
+	})
 	if err != nil {
 		return UpdateInstallResult{}, err
 	}

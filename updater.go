@@ -198,6 +198,21 @@ func (u *releaseUpdater) fetchRelease(ctx context.Context, endpoint string) (git
 }
 
 func (u *releaseUpdater) downloadAndOpen(ctx context.Context, progress func(UpdateDownloadProgress)) (string, error) {
+	destination, err := u.downloadVerified(ctx, progress)
+	if err != nil {
+		return "", err
+	}
+	if err := u.openDownloaded(destination); err != nil {
+		return "", fmt.Errorf("open downloaded update: %w", err)
+	}
+	return destination, nil
+}
+
+// downloadVerified fetches the matching release asset into the update cache
+// and returns its path after SHA-256 verification. It does not open the file:
+// the in-place installer mounts or unpacks it itself, and opening a DMG here
+// would send the user back to dragging the application into /Applications.
+func (u *releaseUpdater) downloadVerified(ctx context.Context, progress func(UpdateDownloadProgress)) (string, error) {
 	u.downloadMu.Lock()
 	defer u.downloadMu.Unlock()
 
@@ -237,9 +252,6 @@ func (u *releaseUpdater) downloadAndOpen(ctx context.Context, progress func(Upda
 	}
 	destination := filepath.Join(cacheRoot, asset.Name)
 	if digest, digestErr := fileSHA256(destination); digestErr == nil && digest == expectedDigest {
-		if err := u.openDownloaded(destination); err != nil {
-			return "", fmt.Errorf("open downloaded update: %w", err)
-		}
 		return destination, nil
 	}
 
@@ -261,9 +273,6 @@ func (u *releaseUpdater) downloadAndOpen(ctx context.Context, progress func(Upda
 	if err := os.Rename(temporary, destination); err != nil {
 		_ = os.Remove(temporary)
 		return "", fmt.Errorf("save downloaded update: %w", err)
-	}
-	if err := u.openDownloaded(destination); err != nil {
-		return "", fmt.Errorf("open downloaded update: %w", err)
 	}
 	return destination, nil
 }

@@ -164,6 +164,9 @@ func updateHelperScript(downloaded, target, executable string) (string, error) {
 // darwinUpdateHelper mounts the downloaded DMG, copies the application out of
 // it over the installed one, and relaunches.
 func darwinUpdateHelper(downloaded, target, executable string) string {
+	dmg := shellQuote(downloaded)
+	app := shellQuote(target)
+	previous := shellQuote(target + updateRelocationSuffix)
 	return fmt.Sprintf(`#!/bin/sh
 # Wait for the application to exit: the bundle cannot be replaced underneath a
 # process that is still running out of it.
@@ -190,9 +193,9 @@ if [ -z "$source_app" ]; then
   exit 1
 fi
 
-previous="%s%s"
+previous=%s
 rm -rf "$previous"
-if ! mv "%s" "$previous"; then
+if ! mv %s "$previous"; then
   log "could not move the installed application aside"
   hdiutil detach "$mount" -quiet
   rm -rf "$mount"
@@ -200,13 +203,13 @@ if ! mv "%s" "$previous"; then
   exit 1
 fi
 
-if ditto "$source_app" "%s"; then
+if ditto "$source_app" %s; then
   log "installed the new version"
   rm -rf "$previous"
 else
   log "install failed; restoring the previous version"
-  rm -rf "%s"
-  mv "$previous" "%s"
+  rm -rf %s
+  mv "$previous" %s
   hdiutil detach "$mount" -quiet
   rm -rf "$mount"
   open %s
@@ -216,28 +219,32 @@ fi
 hdiutil detach "$mount" -quiet
 rm -rf "$mount"
 log "relaunching"
-open "%s"
+open %s
 rm -f "$0"
 `,
 		os.Getpid(),
-		shellQuote(downloaded), shellQuote(target),
-		shellQuote(downloaded),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target), updateRelocationSuffix,
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
+		dmg, app,
+		dmg,
+		app,
+		app,
+		previous,
+		app,
+		app,
+		app,
+		app,
+		app,
+		app,
+		app,
 	)
 }
 
 // linuxUpdateHelper unpacks the release archive over the installation
 // directory, moving the old tree aside first so a failure can be undone.
 func linuxUpdateHelper(downloaded, target, executable string) string {
+	archive := shellQuote(downloaded)
+	install := shellQuote(target)
+	previous := shellQuote(target + updateRelocationSuffix)
+	binary := shellQuote(executable)
 	return fmt.Sprintf(`#!/bin/sh
 pid=%d
 while kill -0 "$pid" 2>/dev/null; do sleep 1; done
@@ -264,38 +271,38 @@ if [ ! -f "$payload/DeepSeekHarnessDesktop" ]; then
   fi
 fi
 
-previous="%s%s"
+previous=%s
 rm -rf "$previous"
-if ! mv "%s" "$previous"; then
+if ! mv %s "$previous"; then
   log "could not move the installation aside"
   rm -rf "$staging"
   exit 1
 fi
 
-if cp -a "$payload/." "%s/"; then
+if cp -a "$payload/." %s/; then
   log "installed the new version"
   rm -rf "$previous" "$staging"
 else
   log "install failed; restoring the previous version"
-  rm -rf "%s"
-  mv "$previous" "%s"
+  rm -rf %s
+  mv "$previous" %s
   rm -rf "$staging"
   exit 1
 fi
 
 log "relaunching"
-"%s" >/dev/null 2>&1 &
+%s >/dev/null 2>&1 &
 rm -f "$0"
 `,
 		os.Getpid(),
-		shellQuote(downloaded), shellQuote(target),
-		shellQuote(downloaded),
-		shellQuote(target), updateRelocationSuffix,
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(target),
-		shellQuote(executable),
+		archive, install,
+		archive,
+		previous,
+		install,
+		install,
+		install,
+		install,
+		binary,
 	)
 }
 
