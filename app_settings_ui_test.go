@@ -55,7 +55,7 @@ func TestInjectDesktopChromeReservesGearSpaceOnMacOS(t *testing.T) {
 	mac := string(injectDesktopChrome(document, "darwin"))
 	// The gear occupies right:8px..44px in the title bar, so the drag region
 	// must stop before it or the gear becomes undraggable chrome.
-	if !strings.Contains(mac, "left:78px;right:48px") {
+	if !strings.Contains(mac, "#dsh-desktop-drag-region{position:absolute;top:0;bottom:0;left:78px;right:48px") {
 		t.Fatalf("macOS drag region does not reserve the gear's corner: %s", mac)
 	}
 }

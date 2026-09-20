@@ -172,6 +172,33 @@ func TestInjectDesktopChrome(t *testing.T) {
 	if !strings.Contains(mac, "padding-top:44px") {
 		t.Fatalf("mac chrome does not reserve traffic-light clearance: %s", mac)
 	}
+	if !strings.Contains(mac, `id="dsh-desktop-brand"`) || !strings.Contains(mac, `src="/favicon.svg"`) {
+		t.Fatalf("mac chrome must use the official DeepSeek mark: %s", mac)
+	}
+	if !strings.Contains(mac, `id="dsh-desktop-wordmark"`) || !strings.Contains(mac, `viewBox="26 0 156 24"`) {
+		t.Fatalf("mac chrome must use the official BrandWordmark lettering: %s", mac)
+	}
+	if !strings.Contains(mac, "由玺朽维护") {
+		t.Fatalf("mac chrome must keep the maintainer line: %s", mac)
+	}
+	if strings.Contains(mac, "DeepSeek Harness<span>") {
+		t.Fatalf("mac chrome must not invent a custom wordmark: %s", mac)
+	}
+	if !strings.Contains(mac, "var(--dsw-alias-bg-base") || !strings.Contains(mac, "var(--dsw-alias-label-primary") {
+		t.Fatalf("mac chrome must follow Bloom/DSH alias tokens: %s", mac)
+	}
+	if !strings.Contains(mac, "data-bloom-variant") {
+		t.Fatalf("mac chrome must resync when Bloom switches palettes: %s", mac)
+	}
+	if !strings.Contains(mac, "WindowSetBackgroundColour") {
+		t.Fatalf("mac chrome must sync the native window fill with the page theme: %s", mac)
+	}
+	if !strings.Contains(mac, "#dsh-desktop-title{position:absolute;top:0;bottom:0;left:86px;right:48px") {
+		t.Fatalf("mac title must sit just right of the traffic lights: %s", mac)
+	}
+	if !strings.Contains(mac, "justify-content:flex-start") {
+		t.Fatalf("mac title must left-align instead of centering: %s", mac)
+	}
 	windows := string(injectDesktopChrome(document, "windows"))
 	for _, expected := range []string{"dsh-desktop-drag-region", "dsh-desktop-window-controls", "WindowToggleMaximise", "window.runtime?.Quit"} {
 		if !strings.Contains(windows, expected) {
@@ -207,6 +234,25 @@ func TestInjectDesktopSessionRestore(t *testing.T) {
 	}
 	if strings.Index(result, `globalThis.__DSH_TRANSPORT__`) < strings.Index(result, `type="module"`) {
 		t.Fatalf("the injected classic script should run during parsing before the deferred upstream module executes: %s", result)
+	}
+}
+
+func TestInjectDesktopExternalLinks(t *testing.T) {
+	document := []byte("<!doctype html><body><div id=\"root\"></div></body>")
+	result := string(injectDesktopExternalLinks(document))
+	for _, expected := range []string{
+		`id="dsh-desktop-external-links"`,
+		`window.runtime.BrowserOpenURL`,
+		`window.open = function(url, target, features)`,
+		`a[href]`,
+		`parsed.origin !== window.location.origin`,
+	} {
+		if !strings.Contains(result, expected) {
+			t.Fatalf("desktop external-link bridge lacks %q: %s", expected, result)
+		}
+	}
+	if strings.Index(result, `dsh-desktop-external-links`) > strings.Index(result, `</body>`) {
+		t.Fatalf("desktop external-link bridge must run before closing body: %s", result)
 	}
 }
 

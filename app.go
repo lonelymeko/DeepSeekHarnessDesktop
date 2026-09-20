@@ -23,6 +23,11 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// desktopWindowTitle is the window name shown in the shell chrome, the Dock,
+// and the injected title bar. HiddenInset hides the native macOS title, so the
+// overlay repeats the same string.
+const desktopWindowTitle = "DeepSeek Harness · 由玺朽维护"
+
 type App struct {
 	ctx      context.Context
 	command  *exec.Cmd
@@ -529,6 +534,7 @@ func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase, brow
 		}
 		_ = response.Body.Close()
 		body = injectDesktopSessionRestore(body, bridgeWebSocketBase)
+		body = injectDesktopExternalLinks(body)
 		body = injectDesktopUpdater(body)
 		if platform == "darwin" || platform == "windows" {
 			body = injectDesktopChrome(body, platform)
@@ -540,6 +546,45 @@ func newHarnessReverseProxy(target *url.URL, platform, bridgeWebSocketBase, brow
 		return nil
 	}
 	return proxy
+}
+
+func injectDesktopExternalLinks(document []byte) []byte {
+	return injectBeforeClosingBody(document, []byte(`<script id="dsh-desktop-external-links">(() => {
+  const runtime = () => window.runtime && typeof window.runtime.BrowserOpenURL === "function" ? window.runtime : null;
+  const openExternal = (value) => {
+    const shell = runtime();
+    if (!shell) return false;
+    let parsed;
+    try { parsed = new URL(String(value || ""), window.location.href); } catch { return false; }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.origin === window.location.origin) return false;
+    shell.BrowserOpenURL(parsed.href);
+    return true;
+  };
+  const NativeOpen = window.open.bind(window);
+  window.open = function(url, target, features) {
+    if (openExternal(url)) {
+      return { closed: false, close() {}, focus() {}, blur() {}, location: { replace(next) { openExternal(next); } } };
+    }
+    return NativeOpen(url, target, features);
+  };
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented) return;
+    const node = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (!node) return;
+    const href = node.getAttribute("href");
+    if (!href) return;
+    const target = (node.getAttribute("target") || "").toLowerCase();
+    let parsed;
+    try { parsed = new URL(href, window.location.href); } catch { return; }
+    const foreign = parsed.origin !== window.location.origin;
+    const newTab = target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1;
+    if ((foreign || newTab) && openExternal(parsed.href)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+})();</script>`))
 }
 
 func injectDesktopSessionRestore(document []byte, bridgeWebSocketBase string) []byte {
@@ -695,8 +740,15 @@ func injectDesktopChrome(document []byte, platform string) []byte {
 	// macOS reserves the right corner for the desktop settings gear, which is
 	// injected into this title bar; Windows already stops the drag region
 	// before its own window controls.
+	dragLeft := "8px"
 	dragRight := "48px"
+	titleLeft := "8px"
 	chromeHeight := "44px"
+	if platform == "darwin" {
+		// Traffic lights occupy roughly 12..70px; sit the title just to their right.
+		dragLeft = "78px"
+		titleLeft = "86px"
+	}
 	if platform == "windows" {
 		dragRight = "116px"
 		chromeHeight = "32px"
@@ -704,13 +756,46 @@ func injectDesktopChrome(document []byte, platform string) []byte {
 	}
 	chrome := fmt.Sprintf(`<style id="dsh-desktop-chrome-style">
 html,body{overflow:hidden!important}body{padding-top:%s!important;box-sizing:border-box!important}#root{height:calc(100vh - %s)!important;min-height:0!important}
-#dsh-desktop-titlebar{position:fixed;inset:0 0 auto 0;height:%s;z-index:2147483646;pointer-events:none;background:rgba(248,248,248,.78);border-bottom:1px solid rgba(0,0,0,.08);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
-body[data-ds-dark-theme] #dsh-desktop-titlebar{background:rgba(20,20,20,.76);border-bottom-color:rgba(255,255,255,.08)}
+#dsh-desktop-titlebar{position:fixed;inset:0 0 auto 0;height:%s;z-index:2147483646;pointer-events:none;color:var(--dsw-alias-label-primary,var(--dsw-alias-fg,#191919));background:color-mix(in oklch,var(--dsw-alias-bg-base,var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg,#f8f8f8))) 78%%,transparent);border-bottom:1px solid var(--dsw-alias-border-l1,var(--dsw-alias-border,rgba(0,0,0,.08)));backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+body[data-ds-dark-theme] #dsh-desktop-titlebar{color:var(--dsw-alias-label-primary,var(--dsw-alias-fg,#f5f5f5));background:color-mix(in oklch,var(--dsw-alias-bg-base,var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg,#141414))) 78%%,transparent);border-bottom-color:var(--dsw-alias-border-l1,var(--dsw-alias-border,rgba(255,255,255,.08)))}
+#dsh-desktop-title{position:absolute;top:0;bottom:0;left:%s;right:%s;display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:0 8px 0 0;font:500 12px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;opacity:.88}
+#dsh-desktop-brand{width:18px;height:18px;flex:none;display:block}
+#dsh-desktop-wordmark{height:14px;width:auto;flex:none;display:block}
 #dsh-desktop-drag-region{position:absolute;top:0;bottom:0;left:%s;right:%s;pointer-events:auto;user-select:none;--wails-draggable:drag}
 #dsh-desktop-window-controls{position:absolute;top:0;right:0;height:32px;display:flex;pointer-events:auto;--wails-draggable:no-drag}
 #dsh-desktop-window-controls button{width:38px;height:32px;border:0;border-radius:0;background:transparent;color:inherit;font:15px/1 system-ui;cursor:default}
 #dsh-desktop-window-controls button:hover{background:rgba(127,127,127,.18)}#dsh-desktop-window-controls button.close:hover{background:#c42b1c;color:#fff}
-</style><div id="dsh-desktop-titlebar"><div id="dsh-desktop-drag-region" aria-hidden="true"></div>%s</div>`, chromeHeight, chromeHeight, chromeHeight, map[string]string{"darwin": "78px", "windows": "8px"}[platform], dragRight, controls)
+</style><div id="dsh-desktop-titlebar"><div id="dsh-desktop-title"><img id="dsh-desktop-brand" src="/favicon.svg" width="18" height="18" alt=""><span class="dsh-desktop-wordmark-wrap">%s</span><span>由玺朽维护</span></div><div id="dsh-desktop-drag-region" aria-hidden="true"></div>%s</div>
+<script id="dsh-desktop-chrome">(() => {
+  const title = %q;
+  const applyTitle = () => { if (document.title !== title) document.title = title; };
+  applyTitle();
+  const rgbOf = (value) => {
+    const match = String(value || "").match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  };
+  const sync = () => {
+    const dark = document.body && document.body.hasAttribute("data-ds-dark-theme");
+    document.documentElement.style.colorScheme = dark ? "dark" : "light";
+    const paint = window.runtime && window.runtime.WindowSetBackgroundColour;
+    if (typeof paint !== "function") return;
+    const bar = document.getElementById("dsh-desktop-titlebar");
+    const painted = bar ? rgbOf(getComputedStyle(bar).backgroundColor) : null;
+    const fallback = rgbOf(getComputedStyle(document.body).backgroundColor);
+    const rgb = painted || fallback;
+    if (rgb) paint(rgb[0], rgb[1], rgb[2], 255);
+    else if (dark) paint(20, 20, 20, 255);
+    else paint(248, 248, 248, 255);
+  };
+  const watch = () => {
+    if (!document.body) return;
+    sync();
+    new MutationObserver(sync).observe(document.body, { attributes: true, attributeFilter: ["data-ds-dark-theme", "data-bloom-variant", "class", "style"] });
+  };
+  if (document.body) watch();
+  else document.addEventListener("DOMContentLoaded", watch);
+  new MutationObserver(applyTitle).observe(document.querySelector("title") || document.head, { childList: true, characterData: true, subtree: true });
+})();</script>`, chromeHeight, chromeHeight, chromeHeight, titleLeft, dragRight, dragLeft, dragRight, officialBrandWordmark, controls, desktopWindowTitle)
 	return injectBeforeClosingBody(document, []byte(chrome))
 }
 

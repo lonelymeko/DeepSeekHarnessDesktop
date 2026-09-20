@@ -57,7 +57,7 @@ func main() {
 	proxy := NewHarnessProxy()
 	app := NewApp(proxy)
 	appOptions := &options.App{
-		Title:     "DeepSeek Harness Desktop",
+		Title:     desktopWindowTitle,
 		Width:     1440,
 		Height:    920,
 		MinWidth:  980,
@@ -81,11 +81,14 @@ func main() {
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: true,
 			WindowIsTranslucent:  true,
-			Appearance:           mac.NSAppearanceNameDarkAqua,
+			// Follow the system appearance so traffic lights and the translucent
+			// title-bar backdrop match a light Endfield theme instead of staying
+			// locked to Dark Aqua.
+			Appearance: mac.DefaultAppearance,
 		},
 	}
 	if runtime.GOOS == "windows" {
-		appOptions.BackgroundColour = &options.RGBA{R: 18, G: 18, B: 18, A: 1}
+		appOptions.BackgroundColour = &options.RGBA{R: 248, G: 248, B: 248, A: 1}
 		appOptions.Frameless = true
 	}
 	err := wails.Run(appOptions)
