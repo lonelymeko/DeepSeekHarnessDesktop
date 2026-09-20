@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 TARGET="${1:-$(go env GOOS)/$(go env GOARCH)}"
-VERSION="${VERSION:-0.1.9}"
+VERSION="${VERSION:-0.1.10}"
 BUILD_COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD)}"
 BUILD_LDFLAGS="-X main.desktopVersion=$VERSION -X main.desktopCommit=$BUILD_COMMIT"
 GOOS_TARGET="${TARGET%/*}"

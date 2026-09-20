@@ -27,7 +27,7 @@ const (
 )
 
 var (
-	desktopVersion = "0.1.9"
+	desktopVersion = "0.1.10"
 	desktopCommit  = ""
 	commitPattern  = regexp.MustCompile(`(?i)\b[0-9a-f]{40}\b`)
 )
